@@ -1,17 +1,37 @@
 package com.flowvpn.app
 
+import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BatteryChargingFull
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.flowvpn.app.ui.screens.home.HomeScreen
 import com.flowvpn.app.ui.theme.FlowVpnTheme
 import com.flowvpn.vpn.FlowVpnService
@@ -74,12 +94,24 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        val appPrefs = getSharedPreferences("flowvpn_app_prefs", Context.MODE_PRIVATE)
+        val hasPromptedBattery = appPrefs.getBoolean("has_prompted_battery_opt", false)
+        val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val isIgnoringBattery = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            powerManager?.isIgnoringBatteryOptimizations(packageName) == true
+        } else {
+            true
+        }
+        val shouldShowBatteryPrompt = !hasPromptedBattery && !isIgnoringBattery
+
         setContent {
             FlowVpnTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
+                    var showBatteryDialog by remember { mutableStateOf(shouldShowBatteryPrompt) }
+
                     com.flowvpn.app.ui.MainScaffold(
                         onConnectClick = { configPath ->
                             requestVpnPermissionAndStart(configPath)
@@ -88,6 +120,81 @@ class MainActivity : ComponentActivity() {
                             stopVpnService()
                         },
                     )
+
+                    if (showBatteryDialog) {
+                        AlertDialog(
+                            onDismissRequest = {
+                                appPrefs.edit().putBoolean("has_prompted_battery_opt", true).apply()
+                                showBatteryDialog = false
+                            },
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Default.BatteryChargingFull,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(32.dp)
+                                )
+                            },
+                            title = {
+                                Text(
+                                    text = "Фоновая работа без ограничений",
+                                    fontWeight = FontWeight.Bold,
+                                    textAlign = TextAlign.Center
+                                )
+                            },
+                            text = {
+                                Text(
+                                    text = "Для стабильной работы VPN без внезапных отключений и разрывов соединения, рекомендуется разрешить приложению FlowVPN работу в фоновом режиме без ограничений батареи.\n\nВ открывшемся окне подтвердите выбор «Без ограничений» или нажмите «Разрешить».",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    lineHeight = 20.sp
+                                )
+                            },
+                            confirmButton = {
+                                Button(
+                                    onClick = {
+                                        appPrefs.edit().putBoolean("has_prompted_battery_opt", true).apply()
+                                        showBatteryDialog = false
+                                        requestIgnoreBatteryOptimizations()
+                                    }
+                                ) {
+                                    Text("Настроить")
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(
+                                    onClick = {
+                                        appPrefs.edit().putBoolean("has_prompted_battery_opt", true).apply()
+                                        showBatteryDialog = false
+                                    }
+                                ) {
+                                    Text("Позже")
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun requestIgnoreBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+            } catch (e: Exception) {
+                try {
+                    val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                    startActivity(intent)
+                } catch (_: Exception) {
+                    try {
+                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = Uri.parse("package:$packageName")
+                        }
+                        startActivity(intent)
+                    } catch (_: Exception) {}
                 }
             }
         }

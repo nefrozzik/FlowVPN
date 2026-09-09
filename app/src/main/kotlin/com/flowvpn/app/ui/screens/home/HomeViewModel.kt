@@ -30,6 +30,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     /** Текущий выбранный сервер из AppContainer */
     val selectedServer: StateFlow<ProxyServerConfig?> = container.selectedServer
 
+    private val _resolvedCountry = MutableStateFlow<String>("—")
+    val resolvedCountry: StateFlow<String> = _resolvedCountry.asStateFlow()
+
     private val _isRefreshingConfig = MutableStateFlow(false)
     val isRefreshingConfig: StateFlow<Boolean> = _isRefreshingConfig.asStateFlow()
 
@@ -41,6 +44,36 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     init {
+        // Определение страны сервера по IP / названию
+        viewModelScope.launch {
+            selectedServer.collect { server ->
+                if (server == null) {
+                    _resolvedCountry.value = "—"
+                    return@collect
+                }
+                // 1. Попытка быстрого разрешения (из кеша, из флага в названии или поля country)
+                val fast = com.flowvpn.core.geoip.GeoIpService.getFastCountry(server)
+                if (!fast.isNullOrBlank()) {
+                    _resolvedCountry.value = fast
+                } else {
+                    _resolvedCountry.value = "..."
+                }
+
+                // 2. Асинхронное GeoIP определение по IP адресу
+                val resolved = com.flowvpn.core.geoip.GeoIpService.resolveCountry(server)
+                if (!resolved.isNullOrBlank()) {
+                    _resolvedCountry.value = resolved
+                    // Сохраняем определенную страну в модель текущего сервера, чтобы сохранить на диск
+                    val current = container.selectedServer.value
+                    if (current != null && current.id == server.id && current.country != resolved) {
+                        container.selectServer(current.copy(country = resolved))
+                    }
+                } else if (fast == null) {
+                    _resolvedCountry.value = "—"
+                }
+            }
+        }
+
         // Восстановление выбранного сервера или выбор первого доступного из подписок
         viewModelScope.launch {
             repository.getAllSubscriptions().collect { subs ->

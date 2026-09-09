@@ -43,6 +43,28 @@ class SettingsRepository(
         it.copy(bypassRussianTraffic = enabled)
     }
 
+    suspend fun setCustomBypassDomains(domains: List<String>) = update {
+        it.copy(customBypassDomains = domains.map { d -> d.trim().lowercase() }.filter { d -> d.isNotBlank() }.distinct())
+    }
+
+    suspend fun addCustomBypassDomain(domain: String) = update {
+        val clean = domain.trim().lowercase()
+            .removePrefix("http://")
+            .removePrefix("https://")
+            .removePrefix("/")
+            .substringBefore("/")
+            .trim()
+        if (clean.isNotBlank() && !it.customBypassDomains.contains(clean)) {
+            it.copy(customBypassDomains = it.customBypassDomains + clean)
+        } else {
+            it
+        }
+    }
+
+    suspend fun removeCustomBypassDomain(domain: String) = update {
+        it.copy(customBypassDomains = it.customBypassDomains.filter { d -> !d.equals(domain.trim(), ignoreCase = true) })
+    }
+
     suspend fun setKillSwitch(enabled: Boolean) = update {
         it.copy(killSwitch = enabled)
     }
@@ -75,10 +97,6 @@ class SettingsRepository(
         it.copy(autoUpdateIntervalHours = hours)
     }
 
-    suspend fun setRootTethering(enabled: Boolean) = update {
-        it.copy(rootTethering = enabled)
-    }
-
     suspend fun setFileLoggingEnabled(enabled: Boolean) = update {
         it.copy(fileLoggingEnabled = enabled)
     }
@@ -96,12 +114,21 @@ class SettingsRepository(
     }
 
     private fun loadSettings(): AppSettings {
-        if (!settingsFile.exists()) {
-            return AppSettings()
-        }
+        val sp = context.getSharedPreferences("flowvpn_settings_prefs", Context.MODE_PRIVATE)
+
+        val json = try {
+            if (settingsFile.exists()) {
+                JSONObject(settingsFile.readText())
+            } else {
+                val spJson = sp.getString("settings_json", null)
+                if (!spJson.isNullOrBlank()) JSONObject(spJson) else null
+            }
+        } catch (e: Exception) {
+            val spJson = sp.getString("settings_json", null)
+            if (!spJson.isNullOrBlank()) runCatching { JSONObject(spJson) }.getOrNull() else null
+        } ?: return AppSettings()
 
         return try {
-            val json = JSONObject(settingsFile.readText())
             val dnsProviderName = json.optString("dnsProvider", DnsProvider.CLOUDFLARE.name)
             val dnsProvider = try {
                 DnsProvider.valueOf(dnsProviderName)
@@ -109,20 +136,29 @@ class SettingsRepository(
                 DnsProvider.CLOUDFLARE
             }
 
+            val customDomains = mutableListOf<String>()
+            val customDomainsArray = json.optJSONArray("customBypassDomains")
+            if (customDomainsArray != null) {
+                for (i in 0 until customDomainsArray.length()) {
+                    val d = customDomainsArray.optString(i)?.trim()?.lowercase()
+                    if (!d.isNullOrBlank()) customDomains.add(d)
+                }
+            }
+
             val loaded = AppSettings(
                 dnsProvider = dnsProvider,
                 customDnsUrl = json.optString("customDnsUrl", "https://dns.google/dns-query"),
                 bypassLan = json.optBoolean("bypassLan", true),
                 bypassRussianTraffic = json.optBoolean("bypassRussianTraffic", true),
+                customBypassDomains = customDomains.distinct(),
                 killSwitch = json.optBoolean("killSwitch", false),
                 blockIpv6 = json.optBoolean("blockIpv6", true),
                 mtu = json.optInt("mtu", 1500),
-                fakeDns = json.optBoolean("fakeDns", true),
+                fakeDns = json.optBoolean("fakeDns", false),
                 sniffing = json.optBoolean("sniffing", true),
                 autoConnect = json.optBoolean("autoConnect", false),
                 autoUpdateSubscriptions = json.optBoolean("autoUpdateSubscriptions", true),
                 autoUpdateIntervalHours = json.optInt("autoUpdateIntervalHours", 24),
-                rootTethering = json.optBoolean("rootTethering", false),
                 fileLoggingEnabled = json.optBoolean("fileLoggingEnabled", false),
             )
             com.flowvpn.core.logger.AppLogManager.isFileLoggingEnabled = loaded.fileLoggingEnabled
@@ -140,6 +176,7 @@ class SettingsRepository(
                 put("customDnsUrl", settings.customDnsUrl)
                 put("bypassLan", settings.bypassLan)
                 put("bypassRussianTraffic", settings.bypassRussianTraffic)
+                put("customBypassDomains", org.json.JSONArray(settings.customBypassDomains))
                 put("killSwitch", settings.killSwitch)
                 put("blockIpv6", settings.blockIpv6)
                 put("mtu", settings.mtu)
@@ -148,10 +185,14 @@ class SettingsRepository(
                 put("autoConnect", settings.autoConnect)
                 put("autoUpdateSubscriptions", settings.autoUpdateSubscriptions)
                 put("autoUpdateIntervalHours", settings.autoUpdateIntervalHours)
-                put("rootTethering", settings.rootTethering)
                 put("fileLoggingEnabled", settings.fileLoggingEnabled)
             }
-            settingsFile.writeText(json.toString(2))
+            val jsonString = json.toString(2)
+            settingsFile.writeText(jsonString)
+
+            // Дублирование в SharedPreferences для гарантированного сохранения после выхода
+            val sp = context.getSharedPreferences("flowvpn_settings_prefs", Context.MODE_PRIVATE)
+            sp.edit().putString("settings_json", jsonString).apply()
         } catch (e: Exception) {
             Timber.e(e, "Ошибка сохранения settings.json")
         }

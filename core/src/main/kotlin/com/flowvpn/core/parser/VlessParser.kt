@@ -82,8 +82,9 @@ object VlessParser {
     }
 
     private fun buildTransport(type: String, params: Map<String, String>): TransportConfig? {
-        if (type == "tcp" && params["headerType"]?.equals("none", true) != false) {
-            return null // TCP без обёртки — транспорт не нужен
+        val lowerType = type.lowercase()
+        if ((lowerType == "tcp" || lowerType == "raw") && params["headerType"]?.equals("none", true) != false) {
+            return null // Прямой TCP/raw без обёртки — транспорт не нужен
         }
 
         return TransportConfig(

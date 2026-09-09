@@ -53,7 +53,7 @@ class SingBoxConfigBuilderTest {
         assertEquals("tun", tun["type"])
         assertEquals("gvisor", tun["stack"])
         assertEquals(true, tun["auto_route"])
-        assertEquals(true, tun["strict_route"])
+        assertEquals(false, tun["strict_route"])
         assertEquals(true, tun["sniff"])
         assertEquals(true, tun["sniff_override_destination"])
         assertEquals(1500.0, (tun["mtu"] as Number).toDouble(), 0.001)

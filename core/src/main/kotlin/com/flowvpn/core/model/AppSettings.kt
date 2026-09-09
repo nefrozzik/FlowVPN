@@ -66,15 +66,15 @@ data class AppSettings(
     val customDnsUrl: String = "https://dns.google/dns-query",
     val bypassLan: Boolean = true,
     val bypassRussianTraffic: Boolean = true,
+    val customBypassDomains: List<String> = emptyList(),
     val killSwitch: Boolean = false,
     val blockIpv6: Boolean = true,
     val mtu: Int = 1500,
-    val fakeDns: Boolean = true,
+    val fakeDns: Boolean = false,
     val sniffing: Boolean = true,
     val autoConnect: Boolean = false,
     val autoUpdateSubscriptions: Boolean = true,
     val autoUpdateIntervalHours: Int = 24,
-    val rootTethering: Boolean = false,
     val fileLoggingEnabled: Boolean = false,
 ) {
     /**

@@ -33,6 +33,10 @@ object DefaultNetworkMonitor {
     var defaultNetwork: Network? = null
         private set
 
+    @Volatile
+    var currentInterfaceName: String? = null
+        private set
+
     private var listener: InterfaceUpdateListener? = null
     private var connectivityManager: ConnectivityManager? = null
     private var isRegistered = false
@@ -125,6 +129,7 @@ object DefaultNetworkMonitor {
     }
 
     private fun notifyInterfaceLost() {
+        currentInterfaceName = null
         try {
             listener?.updateDefaultInterface("", -1, false, false)
         } catch (t: Throwable) {
@@ -197,6 +202,7 @@ object DefaultNetworkMonitor {
         }
         listener = null
         defaultNetwork = null
+        currentInterfaceName = null
     }
 
     fun setListener(updateListener: InterfaceUpdateListener?) {
@@ -206,6 +212,16 @@ object DefaultNetworkMonitor {
             findPhysicalNetwork(cm)?.let { defaultNetwork = it }
         }
         defaultNetwork?.let { updateInterface(it) }
+    }
+
+    /**
+     * Получение имени активного физического исходящего интерфейса (например, "wlan0", "rmnet_data0").
+     */
+    fun getPhysicalInterfaceName(context: Context? = null): String? {
+        currentInterfaceName?.let { return it }
+        val cm = connectivityManager ?: (context?.getSystemService<ConnectivityManager>()) ?: return null
+        val net = defaultNetwork ?: findPhysicalNetwork(cm) ?: return null
+        return cm.getLinkProperties(net)?.interfaceName
     }
 
     /**
@@ -261,6 +277,8 @@ object DefaultNetworkMonitor {
                     Timber.w("DefaultNetworkMonitor: Пропуск нефизического интерфейса $ifaceName")
                     return@launch
                 }
+
+                currentInterfaceName = ifaceName
 
                 var ifaceIndex = -1
                 for (times in 0 until 10) {

@@ -1,6 +1,7 @@
 package com.flowvpn.vpn
 
 import android.app.Notification
+import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.VpnService
@@ -123,11 +124,6 @@ class FlowVpnService : VpnService() {
                     com.flowvpn.core.model.VpnState.Connected(serverName = serverName)
                 )
                 CoreLogManager.log("VPN успешно подключен: $serverName", tag = "VPN")
-
-                val settings = loadSettings()
-                if (settings.rootTethering) {
-                    RootTetheringManager.enableTethering()
-                }
             } catch (t: Throwable) {
                 Timber.e(t, "FlowVpnService: Ошибка запуска ядра")
                 val errorMsg = t.localizedMessage ?: t.message ?: "Ошибка запуска ядра"
@@ -150,10 +146,6 @@ class FlowVpnService : VpnService() {
 
         serviceScope.launch(Dispatchers.IO) {
             try {
-                val settings = runCatching { loadSettings() }.getOrNull()
-                if (settings?.rootTethering == true) {
-                    RootTetheringManager.disableTethering()
-                }
                 boxManager?.stop()
                 boxManager = null
             } catch (e: Exception) {
@@ -331,16 +323,6 @@ class FlowVpnService : VpnService() {
                     addRoute(dnsToUse, 32)
                 } catch (_: Exception) {}
 
-                // Исключение прямого маршрута до хоста прокси (Android 13+)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && server != null) {
-                    try {
-                        val host = server.address
-                        if (host.matches(Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"""))) {
-                            excludeRoute(android.net.IpPrefix(java.net.InetAddress.getByName(host), 32))
-                        }
-                    } catch (_: Exception) {}
-                }
-
                 setMtu(effectiveMtu)
                 setSession("FlowVPN")
                 // Неблокирующий режим критически важен для асинхронного Go netstack (gVisor)
@@ -399,24 +381,41 @@ class FlowVpnService : VpnService() {
     private fun loadSettings(): AppSettings {
         return try {
             val settingsFile = java.io.File(filesDir, "settings.json")
-            if (settingsFile.exists()) {
-                val json = org.json.JSONObject(settingsFile.readText())
+            val json = if (settingsFile.exists()) {
+                org.json.JSONObject(settingsFile.readText())
+            } else {
+                val sp = getSharedPreferences("flowvpn_settings_prefs", Context.MODE_PRIVATE)
+                val spJson = sp.getString("settings_json", null)
+                if (!spJson.isNullOrBlank()) org.json.JSONObject(spJson) else null
+            }
+
+            if (json != null) {
                 val dnsProviderName = json.optString("dnsProvider", "CLOUDFLARE")
                 val provider = try { DnsProvider.valueOf(dnsProviderName) } catch (_: Exception) { DnsProvider.CLOUDFLARE }
+
+                val customDomains = mutableListOf<String>()
+                val customDomainsArray = json.optJSONArray("customBypassDomains")
+                if (customDomainsArray != null) {
+                    for (i in 0 until customDomainsArray.length()) {
+                        val d = customDomainsArray.optString(i)?.trim()?.lowercase()
+                        if (!d.isNullOrBlank()) customDomains.add(d)
+                    }
+                }
+
                 AppSettings(
                     dnsProvider = provider,
                     customDnsUrl = json.optString("customDnsUrl", "https://dns.google/dns-query"),
                     bypassLan = json.optBoolean("bypassLan", true),
                     bypassRussianTraffic = json.optBoolean("bypassRussianTraffic", true),
+                    customBypassDomains = customDomains.distinct(),
                     killSwitch = json.optBoolean("killSwitch", false),
                     blockIpv6 = json.optBoolean("blockIpv6", true),
                     mtu = json.optInt("mtu", 1500),
-                    fakeDns = json.optBoolean("fakeDns", true),
+                    fakeDns = json.optBoolean("fakeDns", false),
                     sniffing = json.optBoolean("sniffing", true),
                     autoConnect = json.optBoolean("autoConnect", false),
                     autoUpdateSubscriptions = json.optBoolean("autoUpdateSubscriptions", true),
                     autoUpdateIntervalHours = json.optInt("autoUpdateIntervalHours", 24),
-                    rootTethering = json.optBoolean("rootTethering", false),
                 )
             } else {
                 AppSettings()
@@ -524,12 +523,6 @@ class FlowVpnService : VpnService() {
     override fun onDestroy() {
         Timber.i("FlowVpnService: onDestroy")
         try {
-            val settings = runCatching { loadSettings() }.getOrNull()
-            if (settings?.rootTethering == true) {
-                kotlinx.coroutines.runBlocking(Dispatchers.IO) {
-                    runCatching { RootTetheringManager.disableTethering() }
-                }
-            }
             boxManager?.stop()
             boxManager = null
         } catch (e: Throwable) {

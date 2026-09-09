@@ -13,6 +13,9 @@
     <!-- Уведомления — API 33+ требует runtime permission -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Запрос работы в фоновом режиме без ограничений батареи -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <!-- Камера для сканирования QR-кодов подписок -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />

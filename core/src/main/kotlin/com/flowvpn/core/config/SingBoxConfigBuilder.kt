@@ -140,7 +140,10 @@ object SingBoxConfigBuilder {
         config.flow?.let { parts += """"flow": "$it"""" }
 
         config.tls?.let { parts += buildTlsBlock(it) }
-        config.transport?.let { parts += buildTransportBlock(it) }
+        config.transport?.let {
+            val block = buildTransportBlock(it)
+            if (block.isNotBlank()) parts += block
+        }
 
         return parts.joinToString(",\n")
     }
@@ -152,7 +155,10 @@ object SingBoxConfigBuilder {
         parts += """"security": "${config.method ?: "auto"}""""
 
         config.tls?.let { parts += buildTlsBlock(it) }
-        config.transport?.let { parts += buildTransportBlock(it) }
+        config.transport?.let {
+            val block = buildTransportBlock(it)
+            if (block.isNotBlank()) parts += block
+        }
 
         return parts.joinToString(",\n")
     }
@@ -169,7 +175,10 @@ object SingBoxConfigBuilder {
         parts += """"password": "${config.password}""""
 
         config.tls?.let { parts += buildTlsBlock(it) }
-        config.transport?.let { parts += buildTransportBlock(it) }
+        config.transport?.let {
+            val block = buildTransportBlock(it)
+            if (block.isNotBlank()) parts += block
+        }
 
         return parts.joinToString(",\n")
     }
@@ -276,9 +285,14 @@ object SingBoxConfigBuilder {
 
     /**
      * Генерация блока транспортного уровня.
-     * sing-box поддерживает: ws, grpc, http, tcp, quic.
+     * sing-box поддерживает: ws, grpc, http, httpupgrade, quic.
+     * Прямой TCP/raw не оборачивается в блок transport.
      */
     private fun buildTransportBlock(transport: com.flowvpn.core.model.TransportConfig): String {
+        val lowerType = transport.type.lowercase()
+        if (lowerType == "tcp" || lowerType == "raw" || lowerType == "none") {
+            return ""
+        }
         val fields = mutableListOf<String>()
         fields += """"type": "${transport.type}""""
 
@@ -305,8 +319,8 @@ object SingBoxConfigBuilder {
     /**
      * Генерация TUN inbound с учетом стека, MTU, автомаршрутизации, IPv6 и фильтрации пакетов.
      *
-     * Для Android 10-15 стек "mixed" обеспечивает совместимость без рут-прав.
-     * auto_route и strict_route установлены в true для исключения утечек и зацикливаний.
+     * Для Android auto_route = true обеспечивает передачу дефолтного маршрута в VpnService,
+     * а strict_route = false предотвращает конфликты с политиками маршрутизации AOSP.
      */
     private fun buildTunInbound(
         settings: com.flowvpn.core.model.AppSettings,
@@ -343,7 +357,7 @@ object SingBoxConfigBuilder {
             "mtu": ${settings.mtu},
             "stack": "gvisor",
             "auto_route": true,
-            "strict_route": true,
+            "strict_route": false,
             "sniff": true,
             "sniff_override_destination": true,
             $packageFilterField
@@ -399,6 +413,15 @@ object SingBoxConfigBuilder {
 
         val dnsServers = mutableListOf<String>()
         dnsServers += remoteDnsServer
+        if (dnsAddress != "local") {
+            dnsServers += """
+                {
+                    "tag": "remote-dns-fallback",
+                    "address": "tcp://1.1.1.1",
+                    "detour": "proxy"
+                }
+            """.trimIndent()
+        }
         dnsServers += directDnsServer
 
         if (settings.fakeDns) {
@@ -438,20 +461,28 @@ object SingBoxConfigBuilder {
             }
         """.trimIndent()
 
-        // 3. Сайты РФ всегда через direct-dns (системный резолвер устройства)
-        if (settings.bypassRussianTraffic) {
-            dnsRules += """
-                {
-                    "domain_suffix": [
-                        ".ru",
-                        ".xn--p1ai",
-                        ".su",
-                        ".by",
-                        ".kz"
-                    ],
-                    "server": "direct-dns"
-                }
-            """.trimIndent()
+        // 3. Сайты РФ и кастомные домены обхода всегда через direct-dns (системный резолвер устройства)
+        if (settings.bypassRussianTraffic || settings.customBypassDomains.isNotEmpty()) {
+            val bypassList = mutableListOf<String>()
+            if (settings.bypassRussianTraffic) {
+                bypassList.addAll(listOf(".ru", ".xn--p1ai", ".su", ".by", ".kz"))
+            }
+            for (domain in settings.customBypassDomains) {
+                val clean = domain.trim().lowercase()
+                if (clean.isNotBlank()) bypassList.add(clean)
+            }
+            val distinctList = bypassList.distinct()
+            if (distinctList.isNotEmpty()) {
+                val domainsJson = distinctList.joinToString(",") { "\"$it\"" }
+                dnsRules += """
+                    {
+                        "domain_suffix": [
+                            $domainsJson
+                        ],
+                        "server": "direct-dns"
+                    }
+                """.trimIndent()
+            }
         }
 
         // 4. FakeDNS только для доменов, идущих в прокси (после исключений direct/proxy-server/RU)
@@ -576,20 +607,28 @@ object SingBoxConfigBuilder {
             """.trimIndent()
         }
 
-        // 5. Обход сайтов РФ (Bypass Russian traffic) через domain_suffix
-        if (settings.bypassRussianTraffic) {
-            rules += """
-                {
-                    "domain_suffix": [
-                        ".ru",
-                        ".xn--p1ai",
-                        ".su",
-                        ".by",
-                        ".kz"
-                    ],
-                    "outbound": "direct"
-                }
-            """.trimIndent()
+        // 5. Обход сайтов РФ и кастомных сайтов (Bypass Russian traffic & custom domains) через domain_suffix
+        if (settings.bypassRussianTraffic || settings.customBypassDomains.isNotEmpty()) {
+            val bypassList = mutableListOf<String>()
+            if (settings.bypassRussianTraffic) {
+                bypassList.addAll(listOf(".ru", ".xn--p1ai", ".su", ".by", ".kz"))
+            }
+            for (domain in settings.customBypassDomains) {
+                val clean = domain.trim().lowercase()
+                if (clean.isNotBlank()) bypassList.add(clean)
+            }
+            val distinctList = bypassList.distinct()
+            if (distinctList.isNotEmpty()) {
+                val domainsJson = distinctList.joinToString(",") { "\"$it\"" }
+                rules += """
+                    {
+                        "domain_suffix": [
+                            $domainsJson
+                        ],
+                        "outbound": "direct"
+                    }
+                """.trimIndent()
+            }
         }
 
         val rulesJson = rules.joinToString(",\n")

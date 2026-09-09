@@ -80,6 +80,7 @@ fun HomeScreen(
 ) {
     val vpnState by viewModel.vpnState.collectAsState()
     val selectedServer by viewModel.selectedServer.collectAsState()
+    val resolvedCountry by viewModel.resolvedCountry.collectAsState()
     val isRefreshing by viewModel.isRefreshingConfig.collectAsState()
     val refreshMessage by viewModel.refreshMessage.collectAsState()
 
@@ -180,7 +181,7 @@ fun HomeScreen(
             ServerCard(
                 serverName = selectedServer?.name ?: "Выберите сервер",
                 protocol = selectedServer?.protocol?.displayName ?: "—",
-                country = selectedServer?.country ?: "—",
+                country = resolvedCountry,
                 onClick = onNavigateToServers,
             )
         }

@@ -19,6 +19,9 @@ class FlowVpnApplication : Application() {
         super.onCreate()
         container = com.flowvpn.app.di.AppContainer(this)
 
+        // Инициализируем GeoIP сервис для определения страны серверов
+        com.flowvpn.core.geoip.GeoIpService.init(this)
+
         // Инициализируем централизованный файловый логгер и перехватчик сбоев
         com.flowvpn.core.logger.AppLogManager.init(this)
         com.flowvpn.core.logger.AppLogManager.isFileLoggingEnabled =

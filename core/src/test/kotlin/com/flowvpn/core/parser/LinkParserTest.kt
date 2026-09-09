@@ -226,4 +226,18 @@ class LinkParserTest {
         assertTrue(configJson.contains("\"auto_route\": true"))
         assertTrue(configJson.contains("\"remote-dns\""))
     }
+
+    @Test
+    fun testParseVlessRawRealityUniversal() {
+        val link = "vless://633f424e-2b11-48da-a6b3-a849dd71456f@45.12.75.242:26424?encryption=none&fp=chrome&pbk=l8AubqcxQO-HRFJy4pZL1vbLOo-eXit69s-XulSELE0&security=reality&sid=23103e1e&sni=ya.ru&type=raw#Beget-1"
+        val server = LinkParser.parse(link)
+        assertNotNull(server)
+        assertEquals("45.12.75.242", server?.address)
+        assertEquals(26424, server?.port)
+        assertEquals(null, server?.transport) // type=raw must NOT create a transport block
+
+        val configJson = SingBoxConfigBuilder.build(server!!)
+        assertTrue(configJson.contains("\"reality\""))
+        assertFalse(configJson.contains("\"type\": \"raw\""))
+    }
 }

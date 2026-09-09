@@ -8,11 +8,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.AltRoute
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
@@ -28,18 +31,21 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.WifiTethering
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -86,8 +92,8 @@ fun SettingsScreen(
     var showMtuDialog by remember { mutableStateOf(false) }
     var showResetDialog by remember { mutableStateOf(false) }
     var showUpdateIntervalDialog by remember { mutableStateOf(false) }
+    var showBypassDomainsDialog by remember { mutableStateOf(false) }
     var isManualUpdating by remember { mutableStateOf(false) }
-    var isCheckingRoot by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     Scaffold(
@@ -127,6 +133,22 @@ fun SettingsScreen(
                     subtitle = "Госуслуги, банки, Яндекс и маркетплейсы (.ru, .рф) работают в обход VPN",
                     checked = settings.bypassRussianTraffic,
                     onCheckedChange = { scope.launch { settingsRepo.setBypassRussianTraffic(it) } }
+                )
+            }
+
+            // Настройка списка сайтов для обхода РФ
+            item {
+                val customCount = settings.customBypassDomains.size
+                val bypassSubtitle = if (customCount > 0) {
+                    "Базовые зоны (.ru, .рф, .su, .by, .kz) + $customCount своих доменов"
+                } else {
+                    "Базовые зоны (.ru, .рф, .su, .by, .kz). Нажмите для добавления своих сайтов"
+                }
+                SettingsClickableCard(
+                    icon = Icons.AutoMirrored.Filled.AltRoute,
+                    title = "Список сайтов для обхода РФ",
+                    subtitle = bypassSubtitle,
+                    onClick = { showBypassDomainsDialog = true }
                 )
             }
 
@@ -323,46 +345,6 @@ fun SettingsScreen(
                 )
             }
 
-            // Раздача VPN через точку доступа (Root)
-            item {
-                SettingsSwitchCard(
-                    icon = Icons.Default.WifiTethering,
-                    title = "Раздача VPN через точку доступа (Root)",
-                    subtitle = if (isCheckingRoot) "Проверка root-прав в системе..." else "Маршрутизация трафика точки доступа Wi-Fi (Hotspot) через VPN с помощью iptables и root-прав",
-                    checked = settings.rootTethering,
-                    enabled = !isCheckingRoot,
-                    onCheckedChange = { enable ->
-                        if (isCheckingRoot) return@SettingsSwitchCard
-                        scope.launch {
-                            if (enable) {
-                                isCheckingRoot = true
-                                val hasRoot = try {
-                                    com.flowvpn.vpn.RootTetheringManager.isRootAvailable()
-                                } finally {
-                                    isCheckingRoot = false
-                                }
-                                if (!hasRoot) {
-                                    snackbarHostState.showSnackbar("Root-доступ не обнаружен. Требуются права суперпользователя (su).")
-                                    return@launch
-                                }
-                            }
-                            settingsRepo.setRootTethering(enable)
-                            val isConnected = com.flowvpn.core.state.VpnStateManager.vpnState.value is com.flowvpn.core.model.VpnState.Connected
-                            if (isConnected) {
-                                if (enable) {
-                                    val ok = com.flowvpn.vpn.RootTetheringManager.enableTethering()
-                                    if (ok) snackbarHostState.showSnackbar("Раздача VPN через точку доступа активирована")
-                                    else snackbarHostState.showSnackbar("Не удалось применить правила iptables для раздачи")
-                                } else {
-                                    com.flowvpn.vpn.RootTetheringManager.disableTethering()
-                                    snackbarHostState.showSnackbar("Раздача VPN через точку доступа отключена")
-                                }
-                            }
-                        }
-                    }
-                )
-            }
-
             // Логи ядра sing-box
             item {
                 SettingsClickableCard(
@@ -417,10 +399,19 @@ fun SettingsScreen(
                     subtitle = "Отключение энергосбережения для стабильного VPN без отключений",
                     onClick = {
                         try {
-                            val intent = android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                            intent.flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                            val intent = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                data = android.net.Uri.parse("package:${context.packageName}")
+                                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                            }
                             context.startActivity(intent)
-                        } catch (_: Exception) {}
+                        } catch (_: Exception) {
+                            try {
+                                val intent = android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                                    flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                                }
+                                context.startActivity(intent)
+                            } catch (_: Exception) {}
+                        }
                     }
                 )
             }
@@ -463,14 +454,14 @@ fun SettingsScreen(
                             )
                             Spacer(modifier = Modifier.width(12.dp))
                             Text(
-                                text = "FlowVPN Client",
+                                text = "FlowVPN Client v${com.flowvpn.app.BuildConfig.VERSION_NAME}",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Core Engine: sing-box libbox v1.14+\nСтек: Android TUN API 26-35, Material Design 3\nПоддержка: VLESS Reality, VMess, Trojan, Hysteria 2, WireGuard, ShadowSocks\nПравила: Amnezia Routing, Bypass LAN, DoH Resolver, FakeDNS",
+                            text = "Версия: ${com.flowvpn.app.BuildConfig.VERSION_NAME} (Публичная бета)\nЯдро: sing-box (libbox) v1.14+\nСтек: Android TUN API 26-35, Material Design 3\nПротоколы: VLESS Reality, VMess, Trojan, Hysteria 2, WireGuard, ShadowSocks\nФункции: Обход РФ, Per-App Split Tunneling, DoH, FakeDNS, Doze Mode",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
                             lineHeight = 18.sp
@@ -688,6 +679,204 @@ fun SettingsScreen(
             dismissButton = {
                 TextButton(onClick = { showUpdateIntervalDialog = false }) {
                     Text("Отмена")
+                }
+            }
+        )
+    }
+
+    // ─── ДИАЛОГ СПИСКА САЙТОВ ДЛЯ ОБХОДА РФ ───
+    if (showBypassDomainsDialog) {
+        var newDomainInput by remember { mutableStateOf("") }
+        var inputError by remember { mutableStateOf<String?>(null) }
+        val baseDomains = listOf(".ru", ".рф (.xn--p1ai)", ".su", ".by", ".kz")
+        val scrollState = rememberScrollState()
+
+        AlertDialog(
+            onDismissRequest = { showBypassDomainsDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Public,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Обход сайтов РФ", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 480.dp)
+                        .verticalScroll(scrollState),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Базовые доменные зоны:",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Весь трафик к сайтам и поддоменам этих зон направляется напрямую мимо VPN:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    // Чипы базовых зон
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        baseDomains.take(3).forEach { d ->
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer
+                            ) {
+                                Text(
+                                    text = d,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        baseDomains.drop(3).forEach { d ->
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer
+                            ) {
+                                Text(
+                                    text = d,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                    Text(
+                        text = "Свои сайты и домены:",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Добавьте домены (например: yandex.net, vk.me, kinopoisk.ru), которые нужно пускать напрямую без VPN:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    // Поле ввода нового домена
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        OutlinedTextField(
+                            value = newDomainInput,
+                            onValueChange = {
+                                newDomainInput = it
+                                inputError = null
+                            },
+                            label = { Text("Домен или суффикс") },
+                            placeholder = { Text("например: 2gis.ru") },
+                            singleLine = true,
+                            isError = inputError != null,
+                            supportingText = inputError?.let { { Text(it, color = MaterialTheme.colorScheme.error) } },
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                val clean = newDomainInput.trim().lowercase()
+                                    .removePrefix("http://")
+                                    .removePrefix("https://")
+                                    .removePrefix("/")
+                                    .substringBefore("/")
+                                    .trim()
+                                if (clean.isBlank()) {
+                                    inputError = "Введите домен"
+                                } else if (settings.customBypassDomains.contains(clean)) {
+                                    inputError = "Уже в списке"
+                                } else {
+                                    scope.launch {
+                                        settingsRepo.addCustomBypassDomain(clean)
+                                    }
+                                    newDomainInput = ""
+                                    inputError = null
+                                }
+                            }
+                        ) {
+                            Text("Добавить")
+                        }
+                    }
+
+                    // Список добавленных пользователем доменов
+                    if (settings.customBypassDomains.isEmpty()) {
+                        Text(
+                            text = "Пользовательские домены еще не добавлены.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                    } else {
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            settings.customBypassDomains.forEach { domain ->
+                                Card(
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                    ),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = domain,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                        IconButton(
+                                            onClick = {
+                                                scope.launch {
+                                                    settingsRepo.removeCustomBypassDomain(domain)
+                                                }
+                                            },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Delete,
+                                                contentDescription = "Удалить",
+                                                tint = MaterialTheme.colorScheme.error,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showBypassDomainsDialog = false }) {
+                    Text("Готово")
                 }
             }
         )
