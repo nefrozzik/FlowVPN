@@ -1,3 +1,0 @@
-extensions:
-  - drift: true
-  - shared_preferences: true
