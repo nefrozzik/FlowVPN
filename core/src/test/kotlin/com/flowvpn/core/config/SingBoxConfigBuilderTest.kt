@@ -1,4 +1,4 @@
-﻿package com.flowvpn.core.config
+package com.flowvpn.core.config
 
 import com.flowvpn.core.model.AppSettings
 import com.flowvpn.core.model.ProxyProtocol
@@ -51,11 +51,11 @@ class SingBoxConfigBuilderTest {
 
         val tun = inbounds[0]
         assertEquals("tun", tun["type"])
-        assertEquals("mixed", tun["stack"])
+        assertEquals("gvisor", tun["stack"])
         assertEquals(true, tun["auto_route"])
         assertEquals(true, tun["strict_route"])
         assertEquals(true, tun["sniff"])
-        assertEquals(false, tun["sniff_override_destination"])
+        assertEquals(true, tun["sniff_override_destination"])
         assertEquals(1500.0, (tun["mtu"] as Number).toDouble(), 0.001)
     }
 

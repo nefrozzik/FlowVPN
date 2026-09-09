@@ -101,7 +101,8 @@ object SingBoxConfigBuilder {
             "type": "${config.protocol.singBoxType}",
             "tag": "proxy",
             "server": "${config.address}",
-            "server_port": ${config.port}
+            "server_port": ${config.port},
+            "domain_resolver": "direct-dns"
         """.trimIndent()
 
         val protocolFields = when (config.protocol) {
@@ -340,11 +341,11 @@ object SingBoxConfigBuilder {
             "inet4_address": "172.19.0.1/30",
             $inet6AddressField
             "mtu": ${settings.mtu},
-            "stack": "mixed",
+            "stack": "gvisor",
             "auto_route": true,
             "strict_route": true,
             "sniff": true,
-            "sniff_override_destination": false,
+            "sniff_override_destination": true,
             $packageFilterField
             "platform": {
                 "http_proxy": {
@@ -419,11 +420,6 @@ object SingBoxConfigBuilder {
         if (serverHost.isNotEmpty() && !isIpAddress(serverHost)) {
             serverDomains.add(serverHost)
         }
-        config.tls?.serverName?.trim()?.let { sni ->
-            if (sni.isNotEmpty() && !isIpAddress(sni) && !serverDomains.contains(sni)) {
-                serverDomains.add(sni)
-            }
-        }
         if (serverDomains.isNotEmpty()) {
             val domainsJson = serverDomains.joinToString(",") { "\"$it\"" }
             dnsRules += """
@@ -460,6 +456,12 @@ object SingBoxConfigBuilder {
 
         // 4. FakeDNS только для доменов, идущих в прокси (после исключений direct/proxy-server/RU)
         if (settings.fakeDns) {
+            dnsRules += """
+                {
+                    "query_type": ["HTTPS", "SVCB"],
+                    "action": "reject"
+                }
+            """.trimIndent()
             dnsRules += """
                 {
                     "query_type": ["A", "AAAA"],
@@ -531,16 +533,6 @@ object SingBoxConfigBuilder {
                 rules += """
                     {
                         "domain": ["$serverHost"],
-                        "outbound": "direct"
-                    }
-                """.trimIndent()
-            }
-        }
-        config.tls?.serverName?.trim()?.let { sni ->
-            if (sni.isNotEmpty() && sni != serverHost && !isIpAddress(sni)) {
-                rules += """
-                    {
-                        "domain": ["$sni"],
                         "outbound": "direct"
                     }
                 """.trimIndent()

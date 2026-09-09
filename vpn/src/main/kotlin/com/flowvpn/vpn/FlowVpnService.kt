@@ -320,10 +320,14 @@ class FlowVpnService : VpnService() {
                 val dnsToUse = if (!coreDns.isNullOrBlank()) coreDns else "172.19.0.2"
                 try {
                     addDnsServer(dnsToUse)
-                    Timber.d("addDnsServer: $dnsToUse")
+                    if (dnsToUse != primaryDns && primaryDns.isNotBlank()) {
+                        try { addDnsServer(primaryDns) } catch (_: Exception) {}
+                    }
+                    Timber.d("addDnsServer: $dnsToUse (secondary: $primaryDns)")
                 } catch (e: Exception) {
                     Timber.w(e, "addDnsServer($dnsToUse) failed, fallback to 172.19.0.2")
                     try { addDnsServer("172.19.0.2") } catch (_: Exception) {}
+                    try { addDnsServer("1.1.1.1") } catch (_: Exception) {}
                 }
 
                 // Samsung Android: явные маршруты для DNS
