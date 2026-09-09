@@ -157,11 +157,16 @@ class BoxServiceManager(
         }
 
         val server = Libbox.newCommandServer(handler, platformInterface)
-        server.start()
-
-        CoreLogManager.log("Запуск службы Sing-box с VLESS Reality/Vision...", LogLevel.INFO, tag = "SingBox")
-        server.startOrReloadService(configContent, null)
         commandServer = server
+        try {
+            server.start()
+            CoreLogManager.log("Запуск службы Sing-box с VLESS Reality/Vision...", LogLevel.INFO, tag = "SingBox")
+            server.startOrReloadService(configContent, null)
+        } catch (t: Throwable) {
+            Timber.e(t, "BoxServiceManager: Ошибка при запуске CommandServer / сервиса Sing-box")
+            stop()
+            throw t
+        }
 
         val ver = runCatching { Libbox.version() }.getOrDefault("")
         CoreLogManager.log("Ядро Sing-box успешно запущено $ver. Весь сетевой стек активен.", LogLevel.INFO, tag = "SingBox")

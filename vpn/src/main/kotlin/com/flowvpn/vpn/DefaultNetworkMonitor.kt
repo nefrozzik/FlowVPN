@@ -72,17 +72,48 @@ object DefaultNetworkMonitor {
                 Timber.w("DefaultNetworkMonitor: Физическая сеть потеряна: $network")
                 defaultNetwork = null
                 notifyInterfaceLost()
+
+                // Попытка переключиться на другую доступную физическую сеть (например, сотовую связь при потере Wi-Fi)
+                val cm = connectivityManager
+                if (cm != null) {
+                    val fallback = findPhysicalNetwork(cm)
+                    if (fallback != null) {
+                        Timber.i("DefaultNetworkMonitor: Найдена альтернативная физическая сеть: $fallback")
+                        defaultNetwork = fallback
+                        updateInterface(fallback)
+                    }
+                }
             }
         }
     }
 
-    private fun isVpnNetwork(caps: NetworkCapabilities?, network: Network): Boolean {
+    fun isVpnNetwork(caps: NetworkCapabilities?, network: Network): Boolean {
         if (caps == null) return false
         if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return true
+        if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) return true
         val cm = connectivityManager ?: return false
         val lp = cm.getLinkProperties(network)
         val iface = lp?.interfaceName?.lowercase() ?: ""
-        return iface.startsWith("tun") || iface.startsWith("ppp") || iface.startsWith("p2p")
+        return iface == "lo" || iface.startsWith("tun") || iface.startsWith("ppp") || iface.startsWith("p2p") || iface.startsWith("dummy")
+    }
+
+    private fun findPhysicalNetwork(cm: ConnectivityManager): Network? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val active = cm.activeNetwork
+            if (active != null) {
+                val caps = cm.getNetworkCapabilities(active)
+                if (!isVpnNetwork(caps, active)) {
+                    return active
+                }
+            }
+        }
+        for (net in cm.allNetworks) {
+            val caps = cm.getNetworkCapabilities(net) ?: continue
+            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) && !isVpnNetwork(caps, net)) {
+                return net
+            }
+        }
+        return null
     }
 
     private fun notifyInterfaceLost() {
@@ -98,14 +129,9 @@ object DefaultNetworkMonitor {
         connectivityManager = cm
 
         // Первичная инициализация физической сетью
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val active = cm.activeNetwork
-            if (active != null) {
-                val caps = cm.getNetworkCapabilities(active)
-                if (!isVpnNetwork(caps, active)) {
-                    defaultNetwork = active
-                }
-            }
+        val initialNet = findPhysicalNetwork(cm)
+        if (initialNet != null) {
+            defaultNetwork = initialNet
         }
 
         if (isRegistered) {
@@ -113,10 +139,11 @@ object DefaultNetworkMonitor {
             return
         }
 
-        // Запрос сети строго без VPN (NET_CAPABILITY_NOT_VPN гарантируется NetworkRequest по умолчанию)
+        // Запрос сети строго без VPN и без loopback (NET_CAPABILITY_NOT_VPN)
         val request = NetworkRequest.Builder()
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
             .build()
 
         try {
@@ -134,7 +161,18 @@ object DefaultNetworkMonitor {
             isRegistered = true
             Timber.i("DefaultNetworkMonitor: Сетевой коллбэк успешно зарегистрирован")
         } catch (e: Exception) {
-            Timber.w(e, "DefaultNetworkMonitor: Ошибка регистрации сетевого коллбэка")
+            Timber.w(e, "DefaultNetworkMonitor: Ошибка регистрации коллбэка через requestNetwork, пробуем registerNetworkCallback")
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    cm.registerNetworkCallback(request, networkCallback, mainHandler)
+                } else {
+                    cm.registerNetworkCallback(request, networkCallback)
+                }
+                isRegistered = true
+                Timber.i("DefaultNetworkMonitor: Сетевой коллбэк зарегистрирован через fallback")
+            } catch (e2: Exception) {
+                Timber.e(e2, "DefaultNetworkMonitor: Не удалось зарегистрировать сетевой коллбэк")
+            }
         }
 
         defaultNetwork?.let { updateInterface(it) }
@@ -155,6 +193,10 @@ object DefaultNetworkMonitor {
 
     fun setListener(updateListener: InterfaceUpdateListener?) {
         listener = updateListener
+        val cm = connectivityManager
+        if (defaultNetwork == null && cm != null) {
+            findPhysicalNetwork(cm)?.let { defaultNetwork = it }
+        }
         defaultNetwork?.let { updateInterface(it) }
     }
 
@@ -166,14 +208,11 @@ object DefaultNetworkMonitor {
         defaultNetwork?.let { return@withContext it }
 
         val cm = connectivityManager
-        if (cm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val active = cm.activeNetwork
-            if (active != null) {
-                val caps = cm.getNetworkCapabilities(active)
-                if (!isVpnNetwork(caps, active)) {
-                    defaultNetwork = active
-                    return@withContext active
-                }
+        if (cm != null) {
+            val physical = findPhysicalNetwork(cm)
+            if (physical != null) {
+                defaultNetwork = physical
+                return@withContext physical
             }
         }
 
@@ -181,6 +220,13 @@ object DefaultNetworkMonitor {
         for (i in 0 until 30) {
             delay(100)
             defaultNetwork?.let { return@withContext it }
+            if (cm != null) {
+                val physical = findPhysicalNetwork(cm)
+                if (physical != null) {
+                    defaultNetwork = physical
+                    return@withContext physical
+                }
+            }
         }
 
         throw java.net.UnknownHostException("Физическая сеть недоступна")
@@ -193,12 +239,18 @@ object DefaultNetworkMonitor {
             val l = listener ?: return@launch
             val cm = connectivityManager ?: return@launch
             try {
+                val caps = cm.getNetworkCapabilities(network)
+                if (isVpnNetwork(caps, network)) {
+                    Timber.w("DefaultNetworkMonitor: updateInterface вызван для VPN сети, игнорируем")
+                    return@launch
+                }
+
                 val linkProps = cm.getLinkProperties(network) ?: return@launch
                 val ifaceName = linkProps.interfaceName ?: return@launch
 
-                // Не передаем VPN-интерфейс
-                if (ifaceName.lowercase().startsWith("tun")) {
-                    Timber.w("DefaultNetworkMonitor: Пропуск VPN интерфейса $ifaceName")
+                // Не передаем VPN/Loopback-интерфейс
+                if (ifaceName.lowercase().let { it == "lo" || it.startsWith("tun") || it.startsWith("ppp") || it.startsWith("p2p") || it.startsWith("dummy") }) {
+                    Timber.w("DefaultNetworkMonitor: Пропуск нефизического интерфейса $ifaceName")
                     return@launch
                 }
 
@@ -206,6 +258,7 @@ object DefaultNetworkMonitor {
                 for (times in 0 until 10) {
                     try {
                         val ni = NetworkInterface.getByName(ifaceName)
+                            ?: NetworkInterface.getNetworkInterfaces()?.toList()?.find { it.name == ifaceName }
                         if (ni != null) {
                             ifaceIndex = ni.index
                             break
@@ -214,11 +267,19 @@ object DefaultNetworkMonitor {
                     delay(50)
                 }
 
-                if (ifaceIndex != -1) {
-                    l.updateDefaultInterface(ifaceName, ifaceIndex, false, false)
-                    Timber.d("DefaultNetworkMonitor: Интерфейс обновлен: $ifaceName (index $ifaceIndex)")
+                val isExpensive = caps != null && !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+                val isConstrained = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && caps != null) {
+                    !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_CONGESTED)
                 } else {
-                    l.updateDefaultInterface(ifaceName, -1, false, false)
+                    false
+                }
+
+                if (ifaceIndex != -1) {
+                    l.updateDefaultInterface(ifaceName, ifaceIndex, isExpensive, isConstrained)
+                    Timber.d("DefaultNetworkMonitor: Физический интерфейс обновлен: $ifaceName (index $ifaceIndex, isExpensive=$isExpensive, isConstrained=$isConstrained)")
+                } else {
+                    Timber.w("DefaultNetworkMonitor: Не удалось определить index для $ifaceName, передаем -1")
+                    l.updateDefaultInterface(ifaceName, -1, isExpensive, isConstrained)
                 }
             } catch (t: Throwable) {
                 Timber.v("DefaultNetworkMonitor: Не удалось обновить интерфейс: ${t.message}")

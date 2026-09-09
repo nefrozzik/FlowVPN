@@ -12,25 +12,25 @@ enum class DnsProvider(
     CLOUDFLARE(
         displayName = "Cloudflare (1.1.1.1)",
         description = "Высокая скорость и приватность",
-        dohUrl = "https://cloudflare-dns.com/dns-query",
+        dohUrl = "https://1.1.1.1/dns-query",
         primaryIp = "1.1.1.1",
     ),
     GOOGLE(
         displayName = "Google (8.8.8.8)",
         description = "Максимальная надежность и стабильность",
-        dohUrl = "https://dns.google/dns-query",
+        dohUrl = "https://8.8.8.8/dns-query",
         primaryIp = "8.8.8.8",
     ),
     ADGUARD(
         displayName = "AdGuard DNS",
         description = "Блокировка рекламы, трекеров и фишинга",
-        dohUrl = "https://dns.adguard-dns.com/dns-query",
+        dohUrl = "https://94.140.14.14/dns-query",
         primaryIp = "94.140.14.14",
     ),
     QUAD9(
         displayName = "Quad9 (9.9.9.9)",
         description = "Защита от вредоносных сайтов и атак",
-        dohUrl = "https://dns.quad9.net/dns-query",
+        dohUrl = "https://9.9.9.9/dns-query",
         primaryIp = "9.9.9.9",
     ),
     SYSTEM(

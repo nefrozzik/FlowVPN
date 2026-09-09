@@ -14,8 +14,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.AltRoute
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
-import androidx.compose.material.icons.filled.AltRoute
 import androidx.compose.material.icons.filled.BatterySaver
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Info
@@ -84,6 +84,7 @@ fun SettingsScreen(
     var showResetDialog by remember { mutableStateOf(false) }
     var showUpdateIntervalDialog by remember { mutableStateOf(false) }
     var isManualUpdating by remember { mutableStateOf(false) }
+    var isCheckingRoot by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     Scaffold(
@@ -146,7 +147,7 @@ fun SettingsScreen(
                 }
 
                 SettingsClickableCard(
-                    icon = Icons.Default.AltRoute,
+                    icon = Icons.AutoMirrored.Filled.AltRoute,
                     title = "Раздельное туннелирование (Per-App)",
                     subtitle = splitSubtitle,
                     onClick = onNavigateToSplitTunneling
@@ -324,12 +325,19 @@ fun SettingsScreen(
                 SettingsSwitchCard(
                     icon = Icons.Default.WifiTethering,
                     title = "Раздача VPN через точку доступа (Root)",
-                    subtitle = "Маршрутизация трафика точки доступа Wi-Fi (Hotspot) через VPN с помощью iptables и root-прав",
+                    subtitle = if (isCheckingRoot) "Проверка root-прав в системе..." else "Маршрутизация трафика точки доступа Wi-Fi (Hotspot) через VPN с помощью iptables и root-прав",
                     checked = settings.rootTethering,
+                    enabled = !isCheckingRoot,
                     onCheckedChange = { enable ->
+                        if (isCheckingRoot) return@SettingsSwitchCard
                         scope.launch {
                             if (enable) {
-                                val hasRoot = com.flowvpn.vpn.RootTetheringManager.isRootAvailable()
+                                isCheckingRoot = true
+                                val hasRoot = try {
+                                    com.flowvpn.vpn.RootTetheringManager.isRootAvailable()
+                                } finally {
+                                    isCheckingRoot = false
+                                }
                                 if (!hasRoot) {
                                     snackbarHostState.showSnackbar("Root-доступ не обнаружен. Требуются права суперпользователя (su).")
                                     return@launch
@@ -713,6 +721,7 @@ private fun SettingsSwitchCard(
     title: String,
     subtitle: String,
     checked: Boolean,
+    enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit
 ) {
     Card(
@@ -736,7 +745,7 @@ private fun SettingsSwitchCard(
                 Icon(
                     icon,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
+                    tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
                     modifier = Modifier.size(26.dp)
                 )
                 Spacer(modifier = Modifier.width(16.dp))
@@ -758,6 +767,7 @@ private fun SettingsSwitchCard(
             }
             Switch(
                 checked = checked,
+                enabled = enabled,
                 onCheckedChange = onCheckedChange
             )
         }

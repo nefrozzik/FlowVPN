@@ -71,13 +71,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.flowvpn.core.model.SubscriptionInfo
+import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.RGBLuminanceSource
+import com.google.zxing.common.GlobalHistogramBinarizer
 import com.google.zxing.common.HybridBinarizer
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -92,6 +97,7 @@ fun SubscriptionsScreen(
     var showImportDialog by remember { mutableStateOf(false) }
     var showQrOptionDialog by remember { mutableStateOf(false) }
     var subscriptionToDelete by remember { mutableStateOf<SubscriptionInfo?>(null) }
+    var isDecodingQr by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -127,12 +133,19 @@ fun SubscriptionsScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri != null) {
-            val text = decodeQrFromUri(context, uri)?.trim()
-            if (!text.isNullOrBlank()) {
-                processScannedContent(text)
-            } else {
-                coroutineScope.launch {
-                    snackbarHostState.showSnackbar("QR-код на изображении не найден")
+            coroutineScope.launch {
+                isDecodingQr = true
+                try {
+                    val text = decodeQrFromUri(context, uri)?.trim()
+                    if (!text.isNullOrBlank()) {
+                        processScannedContent(text)
+                    } else {
+                        snackbarHostState.showSnackbar("QR-код на изображении не найден")
+                    }
+                } catch (e: Throwable) {
+                    snackbarHostState.showSnackbar("Не удалось прочитать изображение: ${e.localizedMessage}")
+                } finally {
+                    isDecodingQr = false
                 }
             }
         }
@@ -252,7 +265,7 @@ fun SubscriptionsScreen(
                 }
             }
 
-            if (isLoading) {
+            if (isLoading || isDecodingQr) {
                 CircularProgressIndicator(
                     modifier = Modifier.align(Alignment.Center)
                 )
@@ -633,27 +646,78 @@ private fun EmptySubscriptionsPlaceholder(
     }
 }
 
-private fun decodeQrFromBitmap(bitmap: Bitmap): String? {
-    val width = bitmap.width
-    val height = bitmap.height
-    val pixels = IntArray(width * height)
-    bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-    val source = RGBLuminanceSource(width, height, pixels)
-    val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
-    return try {
-        MultiFormatReader().decode(binaryBitmap).text
-    } catch (e: Exception) {
+private suspend fun decodeQrFromUri(context: Context, uri: Uri): String? = withContext(Dispatchers.IO) {
+    var inputStream = runCatching { context.contentResolver.openInputStream(uri) }.getOrNull() ?: return@withContext null
+    try {
+        val options = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+        BitmapFactory.decodeStream(inputStream, null, options)
+        inputStream.close()
+
+        val maxDim = maxOf(options.outWidth, options.outHeight)
+        var sampleSize = 1
+        val targetDim = 1200
+        while (maxDim / sampleSize > targetDim) {
+            sampleSize *= 2
+        }
+
+        val decodeOptions = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.RGB_565
+        }
+
+        inputStream = context.contentResolver.openInputStream(uri) ?: return@withContext null
+        val bitmap = BitmapFactory.decodeStream(inputStream, null, decodeOptions) ?: return@withContext null
+        try {
+            decodeQrFromBitmap(bitmap)
+        } finally {
+            bitmap.recycle()
+        }
+    } catch (e: Throwable) {
         null
+    } finally {
+        runCatching { inputStream.close() }
     }
 }
 
-private fun decodeQrFromUri(context: Context, uri: Uri): String? {
+private fun decodeQrFromBitmap(bitmap: Bitmap): String? {
     return try {
-        context.contentResolver.openInputStream(uri)?.use { inputStream ->
-            val bitmap = BitmapFactory.decodeStream(inputStream) ?: return null
-            decodeQrFromBitmap(bitmap)
-        }
-    } catch (e: Exception) {
+        val width = bitmap.width
+        val height = bitmap.height
+        val pixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        val source = RGBLuminanceSource(width, height, pixels)
+
+        val hints = mapOf(
+            DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
+            DecodeHintType.TRY_HARDER to true,
+            DecodeHintType.CHARACTER_SET to "UTF-8"
+        )
+        val reader = MultiFormatReader()
+
+        // 1. Попытка с HybridBinarizer
+        try {
+            return reader.decode(BinaryBitmap(HybridBinarizer(source)), hints).text
+        } catch (_: Exception) {}
+
+        // 2. Попытка с GlobalHistogramBinarizer (лучше работает при плохом освещении/бликах)
+        try {
+            return reader.decode(BinaryBitmap(GlobalHistogramBinarizer(source)), hints).text
+        } catch (_: Exception) {}
+
+        // 3. Попытка с инверсией цветов (для темных тем и белых QR на черном фоне)
+        val invertedSource = source.invert()
+        try {
+            return reader.decode(BinaryBitmap(HybridBinarizer(invertedSource)), hints).text
+        } catch (_: Exception) {}
+
+        try {
+            return reader.decode(BinaryBitmap(GlobalHistogramBinarizer(invertedSource)), hints).text
+        } catch (_: Exception) {}
+
+        null
+    } catch (e: Throwable) {
         null
     }
 }

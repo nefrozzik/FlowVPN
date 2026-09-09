@@ -42,9 +42,9 @@ object SingBoxConfigBuilder {
         excludedApps: List<String>? = null,
     ): String {
         val outbound = buildOutbound(config)
-        val dns = buildDns(settings)
+        val dns = buildDns(config, settings)
         val inbound = buildTunInbound(settings, enabledApps, excludedApps)
-        val route = buildRoute(settings)
+        val route = buildRoute(config, settings)
 
         return """
         {
@@ -294,23 +294,37 @@ object SingBoxConfigBuilder {
     }
 
     /**
-     * Генерация TUN inbound с учетом настроек MTU, Kill Switch, IPv6 и Sniffing.
+     * Проверка, является ли строка IPv4 или IPv6 адресом.
+     */
+    private fun isIpAddress(host: String): Boolean {
+        val trimmed = host.trim()
+        return trimmed.matches(Regex("""^(\d{1,3}\.){3}\d{1,3}$""")) || trimmed.contains(":")
+    }
+
+    /**
+     * Генерация TUN inbound с учетом стека, MTU, автомаршрутизации, IPv6 и фильтрации пакетов.
+     *
+     * Для Android 10-15 стек "mixed" обеспечивает совместимость без рут-прав.
+     * auto_route и strict_route установлены в true для исключения утечек и зацикливаний.
      */
     private fun buildTunInbound(
         settings: com.flowvpn.core.model.AppSettings,
         enabledApps: List<String>?,
         excludedApps: List<String>?,
     ): String {
-        val platformBlock = buildString {
-            append(""""http_proxy": {"enabled": false}""")
+        val validEnabledApps = enabledApps?.filter { it.isNotBlank() }
+        val validExcludedApps = excludedApps?.filter { it.isNotBlank() }
 
-            if (!enabledApps.isNullOrEmpty()) {
-                val appsList = enabledApps.joinToString(",") { "\"$it\"" }
-                append(""","include_package": [$appsList]""")
-            } else if (!excludedApps.isNullOrEmpty()) {
-                val appsList = excludedApps.joinToString(",") { "\"$it\"" }
-                append(""","exclude_package": [$appsList]""")
+        val packageFilterField = when {
+            !validEnabledApps.isNullOrEmpty() -> {
+                val appsList = validEnabledApps.joinToString(",") { "\"$it\"" }
+                """"include_package": [$appsList],"""
             }
+            !validExcludedApps.isNullOrEmpty() -> {
+                val appsList = validExcludedApps.joinToString(",") { "\"$it\"" }
+                """"exclude_package": [$appsList],"""
+            }
+            else -> ""
         }
 
         val inet6AddressField = if (settings.blockIpv6) {
@@ -326,11 +340,17 @@ object SingBoxConfigBuilder {
             "inet4_address": "172.19.0.1/30",
             $inet6AddressField
             "mtu": ${settings.mtu},
+            "stack": "mixed",
             "auto_route": true,
-            "strict_route": ${settings.killSwitch},
-            "sniff": ${settings.sniffing},
+            "strict_route": true,
+            "sniff": true,
             "sniff_override_destination": false,
-            "platform": {$platformBlock}
+            $packageFilterField
+            "platform": {
+                "http_proxy": {
+                    "enabled": false
+                }
+            }
         }
         """.trimIndent()
     }
@@ -338,8 +358,14 @@ object SingBoxConfigBuilder {
     /**
      * Генерация DNS-конфигурации с поддержкой DoH пресетов, системного DNS,
      * кастомного DNS, FakeDNS и блокировки IPv6 (strategy: ipv4_only).
+     *
+     * Домены прокси-серверов всегда резолвятся через direct-dns (local с detour direct)
+     * ДО правил FakeDNS, что устраняет циклические дедлоки и потерю связи.
      */
-    private fun buildDns(settings: com.flowvpn.core.model.AppSettings): String {
+    private fun buildDns(
+        config: ProxyServerConfig,
+        settings: com.flowvpn.core.model.AppSettings,
+    ): String {
         val dnsAddress = settings.getEffectiveDnsAddress()
         val strategy = if (settings.blockIpv6) "ipv4_only" else "prefer_ipv4"
 
@@ -385,6 +411,30 @@ object SingBoxConfigBuilder {
         }
 
         val dnsRules = mutableListOf<String>()
+
+        // 1. Домен самого прокси-сервера ВСЕГДА резолвится через direct-dns (локальный DNS устройства напрямую),
+        // иначе при запуске прокси возникает дедлок или резолв в Fake IP
+        val serverDomains = mutableListOf<String>()
+        val serverHost = config.address.trim()
+        if (serverHost.isNotEmpty() && !isIpAddress(serverHost)) {
+            serverDomains.add(serverHost)
+        }
+        config.tls?.serverName?.trim()?.let { sni ->
+            if (sni.isNotEmpty() && !isIpAddress(sni) && !serverDomains.contains(sni)) {
+                serverDomains.add(sni)
+            }
+        }
+        if (serverDomains.isNotEmpty()) {
+            val domainsJson = serverDomains.joinToString(",") { "\"$it\"" }
+            dnsRules += """
+                {
+                    "domain": [$domainsJson],
+                    "server": "direct-dns"
+                }
+            """.trimIndent()
+        }
+
+        // 2. DNS-запросы от прямого трафика — в direct-dns
         dnsRules += """
             {
                 "outbound": "direct",
@@ -392,20 +442,23 @@ object SingBoxConfigBuilder {
             }
         """.trimIndent()
 
-        // Сайты РФ всегда через direct-dns (системный резолвер устройства)
-        dnsRules += """
-            {
-                "domain_suffix": [
-                    ".ru",
-                    ".xn--p1ai",
-                    ".su",
-                    ".by",
-                    ".kz"
-                ],
-                "server": "direct-dns"
-            }
-        """.trimIndent()
+        // 3. Сайты РФ всегда через direct-dns (системный резолвер устройства)
+        if (settings.bypassRussianTraffic) {
+            dnsRules += """
+                {
+                    "domain_suffix": [
+                        ".ru",
+                        ".xn--p1ai",
+                        ".su",
+                        ".by",
+                        ".kz"
+                    ],
+                    "server": "direct-dns"
+                }
+            """.trimIndent()
+        }
 
+        // 4. FakeDNS только для доменов, идущих в прокси (после исключений direct/proxy-server/RU)
         if (settings.fakeDns) {
             dnsRules += """
                 {
@@ -434,26 +487,67 @@ object SingBoxConfigBuilder {
     }
 
     /**
-     * Генерация маршрутов.
+     * Генерация маршрутов sing-box.
      *
      * Поддерживает:
-     * - Перенаправление DNS-трафика в sing-box DNS (hijack-dns / dns-out)
+     * - Вывод трафика к самому прокси-серверу в direct (защита от зацикливания сокетов)
+     * - Перенаправление DNS-трафика (порт 53 и протокол dns) в dns-out
      * - Блокировку IPv6 (защита от утечек)
-     * - Обход локальной сети (Bypass LAN)
+     * - Обход локальной сети (Bypass LAN / ip_is_private)
      * - Обход сайтов РФ (Российские сервисы напрямую: .ru, .рф, банки, госуслуги)
      */
-    private fun buildRoute(settings: com.flowvpn.core.model.AppSettings): String {
+    private fun buildRoute(
+        config: ProxyServerConfig,
+        settings: com.flowvpn.core.model.AppSettings,
+    ): String {
         val rules = mutableListOf<String>()
 
-        // 1. DNS трафик — перехват встроенным DNS-модулем
+        // 1. DNS трафик — перенаправление в outbound dns-out
         rules += """
             {
                 "protocol": "dns",
-                "action": "hijack-dns"
+                "outbound": "dns-out"
+            }
+        """.trimIndent()
+        rules += """
+            {
+                "port": [53],
+                "outbound": "dns-out"
             }
         """.trimIndent()
 
-        // 2. Блокировка IPv6 при включенной защите от утечек
+        // 2. Трафик к самому прокси-серверу — ВСЕГДА direct, чтобы исключить петлю маршрутизации
+        val serverHost = config.address.trim()
+        if (serverHost.isNotEmpty()) {
+            if (isIpAddress(serverHost)) {
+                val cidr = if (serverHost.contains(":")) "$serverHost/128" else "$serverHost/32"
+                rules += """
+                    {
+                        "ip_cidr": ["$cidr"],
+                        "outbound": "direct"
+                    }
+                """.trimIndent()
+            } else {
+                rules += """
+                    {
+                        "domain": ["$serverHost"],
+                        "outbound": "direct"
+                    }
+                """.trimIndent()
+            }
+        }
+        config.tls?.serverName?.trim()?.let { sni ->
+            if (sni.isNotEmpty() && sni != serverHost && !isIpAddress(sni)) {
+                rules += """
+                    {
+                        "domain": ["$sni"],
+                        "outbound": "direct"
+                    }
+                """.trimIndent()
+            }
+        }
+
+        // 3. Блокировка IPv6 при включенной защите от утечек
         if (settings.blockIpv6) {
             rules += """
                 {
@@ -463,7 +557,7 @@ object SingBoxConfigBuilder {
             """.trimIndent()
         }
 
-        // 3. Обход локальной сети (Bypass LAN)
+        // 4. Обход локальной сети (Bypass LAN) через встроенный ip_is_private
         if (settings.bypassLan) {
             rules += """
                 {
@@ -473,7 +567,7 @@ object SingBoxConfigBuilder {
             """.trimIndent()
         }
 
-        // 4. Обход сайтов РФ (Bypass Russian traffic) через domain_suffix
+        // 5. Обход сайтов РФ (Bypass Russian traffic) через domain_suffix
         if (settings.bypassRussianTraffic) {
             rules += """
                 {
@@ -497,7 +591,6 @@ object SingBoxConfigBuilder {
                     $rulesJson
                 ],
                 "auto_detect_interface": true,
-                "default_domain_resolver": "direct-dns",
                 "final": "proxy"
             }
         """.trimIndent()

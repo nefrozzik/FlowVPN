@@ -26,17 +26,18 @@ object RootTetheringManager {
 
     /**
      * Проверка доступности Root-прав (наличие бинарника su и ответ id uid=0).
+     * Таймаут 10 секунд достаточен для отображения системного диалога запроса суперпользователя (Magisk / KernelSU / APatch).
      */
     suspend fun isRootAvailable(): Boolean = withContext(Dispatchers.IO) {
         return@withContext try {
-            val process = ProcessBuilder("su", "-c", "id").start()
-            val finished = process.waitFor(2, TimeUnit.SECONDS)
+            val process = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
+            val finished = process.waitFor(10, TimeUnit.SECONDS)
             if (!finished) {
-                process.destroy()
+                process.destroyForcibly()
                 return@withContext false
             }
+            val output = process.inputStream.bufferedReader().readText()
             if (process.exitValue() == 0) {
-                val output = BufferedReader(InputStreamReader(process.inputStream)).readText()
                 output.contains("uid=0")
             } else {
                 false
@@ -66,12 +67,22 @@ object RootTetheringManager {
             // 3. Разрешение пересылки пакетов между интерфейсами hotspot и tun0
             "iptables -D FORWARD -o $TUN_INTERFACE -j ACCEPT 2>/dev/null || true",
             "iptables -I FORWARD 1 -o $TUN_INTERFACE -j ACCEPT",
-            "iptables -D FORWARD -i $TUN_INTERFACE -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true",
-            "iptables -I FORWARD 2 -i $TUN_INTERFACE -m state --state RELATED,ESTABLISHED -j ACCEPT",
+            "iptables -D FORWARD -i $TUN_INTERFACE -j ACCEPT 2>/dev/null || true",
+            "iptables -I FORWARD 2 -i $TUN_INTERFACE -j ACCEPT",
 
-            // 4. Policy routing для стандартных подсетей раздачи Android (192.168.43.x, 192.168.49.x и т.д.)
+            // 4. Перенаправление DNS-запросов от клиентов hotspot (UDP/TCP 53) в VPN
+            "iptables -t nat -D PREROUTING -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true",
+            "iptables -t nat -D PREROUTING -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true",
+            "iptables -t nat -A PREROUTING -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true",
+            "iptables -t nat -A PREROUTING -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true",
+
+            // 5. Policy routing для стандартных подсетей раздачи Android (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
             "ip rule del from 192.168.0.0/16 table $ROUTING_TABLE_ID 2>/dev/null || true",
             "ip rule add from 192.168.0.0/16 table $ROUTING_TABLE_ID pref $ROUTING_TABLE_ID 2>/dev/null || true",
+            "ip rule del from 10.0.0.0/8 table $ROUTING_TABLE_ID 2>/dev/null || true",
+            "ip rule add from 10.0.0.0/8 table $ROUTING_TABLE_ID pref $ROUTING_TABLE_ID 2>/dev/null || true",
+            "ip rule del from 172.16.0.0/12 table $ROUTING_TABLE_ID 2>/dev/null || true",
+            "ip rule add from 172.16.0.0/12 table $ROUTING_TABLE_ID pref $ROUTING_TABLE_ID 2>/dev/null || true",
             "ip route flush table $ROUTING_TABLE_ID 2>/dev/null || true",
             "ip route add default dev $TUN_INTERFACE table $ROUTING_TABLE_ID 2>/dev/null || true"
         )
@@ -96,8 +107,12 @@ object RootTetheringManager {
         val commands = listOf(
             "iptables -t nat -D POSTROUTING -o $TUN_INTERFACE -j MASQUERADE 2>/dev/null || true",
             "iptables -D FORWARD -o $TUN_INTERFACE -j ACCEPT 2>/dev/null || true",
-            "iptables -D FORWARD -i $TUN_INTERFACE -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true",
+            "iptables -D FORWARD -i $TUN_INTERFACE -j ACCEPT 2>/dev/null || true",
+            "iptables -t nat -D PREROUTING -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true",
+            "iptables -t nat -D PREROUTING -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null || true",
             "ip rule del from 192.168.0.0/16 table $ROUTING_TABLE_ID 2>/dev/null || true",
+            "ip rule del from 10.0.0.0/8 table $ROUTING_TABLE_ID 2>/dev/null || true",
+            "ip rule del from 172.16.0.0/12 table $ROUTING_TABLE_ID 2>/dev/null || true",
             "ip route flush table $ROUTING_TABLE_ID 2>/dev/null || true"
         )
 
@@ -109,7 +124,7 @@ object RootTetheringManager {
     private fun executeCommands(commands: List<String>): Boolean {
         return try {
             val script = commands.joinToString("\n")
-            val process = ProcessBuilder("su").start()
+            val process = ProcessBuilder("su").redirectErrorStream(true).start()
 
             process.outputStream.bufferedWriter().use { writer ->
                 writer.write(script)
@@ -117,16 +132,16 @@ object RootTetheringManager {
                 writer.flush()
             }
 
-            val finished = process.waitFor(5, TimeUnit.SECONDS)
+            val output = process.inputStream.bufferedReader().readText()
+            val finished = process.waitFor(10, TimeUnit.SECONDS)
             if (!finished) {
-                process.destroy()
+                process.destroyForcibly()
                 return false
             }
 
             val exitCode = process.exitValue()
             if (exitCode != 0) {
-                val error = BufferedReader(InputStreamReader(process.errorStream)).readText()
-                Timber.w("RootTetheringManager exitCode=$exitCode: $error")
+                Timber.w("RootTetheringManager exitCode=$exitCode: $output")
             }
             exitCode == 0
         } catch (e: Exception) {

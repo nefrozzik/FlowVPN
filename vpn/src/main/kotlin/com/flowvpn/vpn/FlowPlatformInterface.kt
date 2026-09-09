@@ -44,13 +44,21 @@ class FlowPlatformInterface(
      * Критически важно: без этого исходящие пакеты прокси зацикливаются в TUN.
      */
     override fun autoDetectInterfaceControl(fd: Int) {
-        try {
-            val protected = vpnService.protect(fd)
-            if (!protected) {
-                Timber.w("FlowPlatformInterface: Не удалось защитить сокет fd=$fd")
+        var success = false
+        for (attempt in 0 until 3) {
+            try {
+                if (vpnService.protect(fd)) {
+                    success = true
+                    break
+                }
+            } catch (t: Throwable) {
+                Timber.w(t, "autoDetectInterfaceControl: попытка $attempt защиты fd=$fd не удалась")
             }
-        } catch (t: Throwable) {
-            Timber.w(t, "autoDetectInterfaceControl failed for fd=$fd")
+            try { Thread.sleep(10) } catch (_: InterruptedException) {}
+        }
+        if (!success) {
+            Timber.e("FlowPlatformInterface: КРИТИЧЕСКАЯ ОШИБКА: Не удалось защитить сокет fd=$fd через VpnService.protect()")
+            throw java.io.IOException("VpnService.protect(fd=$fd) failed")
         }
     }
 
@@ -132,11 +140,15 @@ class FlowPlatformInterface(
                     val caps = cm.getNetworkCapabilities(network) ?: continue
                     val ifaceName = linkProps.interfaceName ?: continue
 
-                    // КРИТИЧЕСКИ ВАЖНО: Исключаем VPN-интерфейсы из списка физических интерфейсов
+                    // КРИТИЧЕСКИ ВАЖНО: Исключаем VPN и виртуальные интерфейсы из списка физических интерфейсов
                     if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
-                    if (ifaceName.lowercase().startsWith("tun")) continue
+                    if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) continue
+                    val lowerName = ifaceName.lowercase()
+                    if (lowerName == "lo" || lowerName.startsWith("tun") || lowerName.startsWith("ppp") || lowerName.startsWith("p2p") || lowerName.startsWith("dummy")) continue
 
-                    val ni = netIfaces.find { it.name == ifaceName } ?: continue
+                    val ni = netIfaces.find { it.name == ifaceName }
+                        ?: runCatching { NetworkInterface.getByName(ifaceName) }.getOrNull()
+                        ?: continue
 
                     val boxIf = LibboxNetworkInterface().apply {
                         name = ifaceName
@@ -149,7 +161,9 @@ class FlowPlatformInterface(
                             caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> Libbox.InterfaceTypeEthernet
                             else -> Libbox.InterfaceTypeOther
                         }
-                        addresses = StringArray(ni.interfaceAddresses.map { addr -> addr.toSafePrefix() })
+                        addresses = StringArray(ni.interfaceAddresses.mapNotNull { addr ->
+                            runCatching { addr.toSafePrefix() }.getOrNull()
+                        })
 
                         var flags = 0
                         if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {

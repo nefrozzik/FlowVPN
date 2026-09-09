@@ -41,10 +41,12 @@ class FlowVpnService : VpnService() {
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
+    private val isStopping = java.util.concurrent.atomic.AtomicBoolean(false)
     private val coroutineExceptionHandler = kotlinx.coroutines.CoroutineExceptionHandler { _, throwable ->
         Timber.e(throwable, "FlowVpnService: Необработанное исключение в корутине")
-        CoreLogManager.log("Критическая ошибка сервиса: ${throwable.message}", LogLevel.ERROR, tag = "VPN")
-        VpnStateManager.setError("Ошибка сервиса: ${throwable.message}")
+        val errorMsg = throwable.localizedMessage ?: throwable.message ?: "Необработанное исключение сервиса"
+        CoreLogManager.log("Критическая ошибка сервиса: $errorMsg", LogLevel.ERROR, tag = "VPN")
+        VpnStateManager.setError("Ошибка сервиса: $errorMsg")
         stopVpn()
     }
     internal val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main + coroutineExceptionHandler)
@@ -53,6 +55,9 @@ class FlowVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) {
             Timber.w("FlowVpnService: onStartCommand с intent == null, завершаем")
+            if (VpnStateManager.vpnState.value is com.flowvpn.core.model.VpnState.Connecting) {
+                VpnStateManager.setDisconnected()
+            }
             stopSelf()
             return START_NOT_STICKY
         }
@@ -64,6 +69,8 @@ class FlowVpnService : VpnService() {
                     startVpn(configPath)
                 } else {
                     Timber.e("FlowVpnService: ACTION_START без config_path")
+                    VpnStateManager.setError("Ошибка запуска: отсутствует путь к файлу конфигурации")
+                    CoreLogManager.log("Ошибка запуска: отсутствует путь к конфигу", LogLevel.ERROR, tag = "VPN")
                     stopSelf()
                 }
             }
@@ -86,6 +93,7 @@ class FlowVpnService : VpnService() {
      */
     private fun startVpn(configPath: String) {
         Timber.i("FlowVpnService: Запуск VPN с конфигом: $configPath")
+        isStopping.set(false)
         CoreLogManager.log("Инициализация VPN-сервиса (Sing-box Core)...", tag = "VPN")
         VpnStateManager.updateState(com.flowvpn.core.model.VpnState.Connecting)
 
@@ -103,13 +111,14 @@ class FlowVpnService : VpnService() {
                 boxManager?.start(configPath)
                 Timber.i("FlowVpnService: Ядро sing-box запущено")
 
+                val serverName = VpnStateManager.currentServerName ?: "FlowVPN Server"
                 val connectedNotification = ServiceNotification.createNotification(
                     context = this@FlowVpnService,
                     state = ServiceNotification.State.CONNECTED,
+                    serverName = serverName,
                 )
                 ServiceNotification.update(this@FlowVpnService, connectedNotification)
 
-                val serverName = VpnStateManager.currentServerName ?: "FlowVPN Server"
                 VpnStateManager.updateState(
                     com.flowvpn.core.model.VpnState.Connected(serverName = serverName)
                 )
@@ -121,8 +130,9 @@ class FlowVpnService : VpnService() {
                 }
             } catch (t: Throwable) {
                 Timber.e(t, "FlowVpnService: Ошибка запуска ядра")
-                VpnStateManager.setError("Ошибка запуска: ${t.message}")
-                CoreLogManager.log("Ошибка запуска ядра: ${t.message}", LogLevel.ERROR, tag = "SingBox")
+                val errorMsg = t.localizedMessage ?: t.message ?: "Ошибка запуска ядра"
+                VpnStateManager.setError("Ошибка запуска: $errorMsg")
+                CoreLogManager.log("Ошибка запуска ядра: $errorMsg", LogLevel.ERROR, tag = "SingBox")
                 stopVpn()
             }
         }
@@ -133,11 +143,15 @@ class FlowVpnService : VpnService() {
      */
     fun stopVpn() {
         Timber.i("FlowVpnService: Остановка VPN")
+        if (!isStopping.compareAndSet(false, true)) {
+            Timber.d("FlowVpnService: stopVpn уже выполняется")
+            return
+        }
 
         serviceScope.launch(Dispatchers.IO) {
             try {
-                val settings = loadSettings()
-                if (settings.rootTethering) {
+                val settings = runCatching { loadSettings() }.getOrNull()
+                if (settings?.rootTethering == true) {
                     RootTetheringManager.disableTethering()
                 }
                 boxManager?.stop()
@@ -146,11 +160,16 @@ class FlowVpnService : VpnService() {
                 Timber.e(e, "FlowVpnService: Ошибка остановки ядра")
             } finally {
                 closeTunInterface()
+                DefaultNetworkMonitor.stop()
 
-                VpnStateManager.setDisconnected()
+                if (VpnStateManager.vpnState.value !is com.flowvpn.core.model.VpnState.Error) {
+                    VpnStateManager.setDisconnected()
+                }
                 CoreLogManager.log("VPN отключен", tag = "VPN")
 
-                stopForeground(STOP_FOREGROUND_REMOVE)
+                try {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                } catch (_: Exception) {}
                 stopSelf()
             }
         }
@@ -219,27 +238,29 @@ class FlowVpnService : VpnService() {
                 if (options.autoRoute) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         val inet4RouteAddress = options.inet4RouteAddress
-                        if (inet4RouteAddress.hasNext()) {
-                            while (inet4RouteAddress.hasNext()) {
-                                try {
-                                    val r = inet4RouteAddress.next()
-                                    addRoute(android.net.IpPrefix(java.net.InetAddress.getByName(r.address()), r.prefix()))
-                                } catch (e: Exception) { Timber.w(e, "addRoute v4 failed") }
-                            }
-                        } else {
+                        var hasV4Route = false
+                        while (inet4RouteAddress.hasNext()) {
+                            try {
+                                val r = inet4RouteAddress.next()
+                                addRoute(android.net.IpPrefix(java.net.InetAddress.getByName(r.address()), r.prefix()))
+                                hasV4Route = true
+                            } catch (e: Exception) { Timber.w(e, "addRoute v4 failed") }
+                        }
+                        if (!hasV4Route) {
                             addRoute("0.0.0.0", 0)
                         }
 
                         if (!blockIpv6) {
                             val inet6RouteAddress = options.inet6RouteAddress
-                            if (inet6RouteAddress.hasNext()) {
-                                while (inet6RouteAddress.hasNext()) {
-                                    try {
-                                        val r = inet6RouteAddress.next()
-                                        addRoute(android.net.IpPrefix(java.net.InetAddress.getByName(r.address()), r.prefix()))
-                                    } catch (e: Exception) { Timber.w(e, "addRoute v6 failed") }
-                                }
-                            } else {
+                            var hasV6Route = false
+                            while (inet6RouteAddress.hasNext()) {
+                                try {
+                                    val r = inet6RouteAddress.next()
+                                    addRoute(android.net.IpPrefix(java.net.InetAddress.getByName(r.address()), r.prefix()))
+                                    hasV6Route = true
+                                } catch (e: Exception) { Timber.w(e, "addRoute v6 failed") }
+                            }
+                            if (!hasV6Route) {
                                 addRoute("::", 0)
                             }
                         }
@@ -295,22 +316,19 @@ class FlowVpnService : VpnService() {
                     if (!blockIpv6) addRoute("::", 0)
                 }
 
-                var addedDns = false
-                runCatching {
-                    val coreDns = options.dnsServerAddress.value
-                    if (coreDns.isNotBlank()) {
-                        addDnsServer(coreDns)
-                        addedDns = true
-                    }
-                }
-                if (!addedDns) {
-                    addDnsServer(primaryDns)
-                    addDnsServer(secondaryDns)
+                val coreDns = runCatching { options.dnsServerAddress.value }.getOrNull()?.trim()
+                val dnsToUse = if (!coreDns.isNullOrBlank()) coreDns else "172.19.0.2"
+                try {
+                    addDnsServer(dnsToUse)
+                    Timber.d("addDnsServer: $dnsToUse")
+                } catch (e: Exception) {
+                    Timber.w(e, "addDnsServer($dnsToUse) failed, fallback to 172.19.0.2")
+                    try { addDnsServer("172.19.0.2") } catch (_: Exception) {}
                 }
 
                 // Samsung Android: явные маршруты для DNS
-                val dnsList = listOf(primaryDns, secondaryDns, "8.8.8.8", "77.88.8.8", "1.1.1.1").distinct()
                 if (Build.BRAND.equals("samsung", ignoreCase = true)) {
+                    val dnsList = listOf(dnsToUse, "172.19.0.2", primaryDns, secondaryDns).distinct()
                     for (dns in dnsList) {
                         try { addRoute(dns, 32) } catch (_: Exception) {}
                     }
@@ -328,9 +346,18 @@ class FlowVpnService : VpnService() {
 
                 setMtu(effectiveMtu)
                 setSession("FlowVPN")
+                // Неблокирующий режим критически важен для асинхронного Go netstack (gVisor)
+                setBlocking(false)
 
+                // По умолчанию Android VpnService НЕ разрешает обход (bypass disallowed).
+                // Мы сознательно не вызываем allowBypass(), гарантируя строгость изоляции трафика.
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     setMetered(false)
+                    DefaultNetworkMonitor.defaultNetwork?.let {
+                        try {
+                            setUnderlyingNetworks(arrayOf(it))
+                        } catch (_: Exception) {}
+                    }
                 }
 
                 applySplitTunneling(this, options)
@@ -502,9 +529,23 @@ class FlowVpnService : VpnService() {
 
     override fun onDestroy() {
         Timber.i("FlowVpnService: onDestroy")
-        serviceScope.cancel()
+        try {
+            val settings = runCatching { loadSettings() }.getOrNull()
+            if (settings?.rootTethering == true) {
+                kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+                    runCatching { RootTetheringManager.disableTethering() }
+                }
+            }
+            boxManager?.stop()
+            boxManager = null
+        } catch (e: Throwable) {
+            Timber.w(e, "FlowVpnService: Ошибка при остановке boxManager в onDestroy")
+        }
         closeTunInterface()
-        if (VpnStateManager.vpnState.value is com.flowvpn.core.model.VpnState.Connected) {
+        DefaultNetworkMonitor.stop()
+        serviceScope.cancel()
+        if (VpnStateManager.vpnState.value is com.flowvpn.core.model.VpnState.Connected ||
+            VpnStateManager.vpnState.value is com.flowvpn.core.model.VpnState.Connecting) {
             VpnStateManager.setDisconnected()
         }
         super.onDestroy()
