@@ -61,7 +61,7 @@ object DefaultNetworkMonitor {
             }
             if (defaultNetwork == network) {
                 updateInterface(network)
-            } else if (defaultNetwork == null && networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+            } else if (defaultNetwork == null && isPhysicalNetwork(networkCapabilities)) {
                 defaultNetwork = network
                 updateInterface(network)
             }
@@ -87,6 +87,14 @@ object DefaultNetworkMonitor {
         }
     }
 
+    private fun isPhysicalNetwork(caps: NetworkCapabilities?): Boolean {
+        if (caps == null) return false
+        val hasPhysicalTransport = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+        return hasPhysicalTransport && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+    }
+
     fun isVpnNetwork(caps: NetworkCapabilities?, network: Network): Boolean {
         if (caps == null) return false
         if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return true
@@ -102,14 +110,14 @@ object DefaultNetworkMonitor {
             val active = cm.activeNetwork
             if (active != null) {
                 val caps = cm.getNetworkCapabilities(active)
-                if (!isVpnNetwork(caps, active)) {
+                if (!isVpnNetwork(caps, active) && isPhysicalNetwork(caps)) {
                     return active
                 }
             }
         }
         for (net in cm.allNetworks) {
             val caps = cm.getNetworkCapabilities(net) ?: continue
-            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) && !isVpnNetwork(caps, net)) {
+            if (isPhysicalNetwork(caps) && !isVpnNetwork(caps, net)) {
                 return net
             }
         }

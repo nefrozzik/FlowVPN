@@ -518,7 +518,24 @@ object SingBoxConfigBuilder {
             }
         """.trimIndent()
 
-        // 2. Трафик к самому прокси-серверу — ВСЕГДА direct, чтобы исключить петлю маршрутизации
+        // 2. Блокировка Private DNS (DoT, TCP 853) — предотвращает зависание проверок Android
+        rules += """
+            {
+                "port": [853],
+                "outbound": "block"
+            }
+        """.trimIndent()
+
+        // 3. Блокировка QUIC (UDP 443) — предотвращает подвисание Chrome и сервисов Google
+        rules += """
+            {
+                "port": [443],
+                "network": "udp",
+                "outbound": "block"
+            }
+        """.trimIndent()
+
+        // 4. Трафик к самому прокси-серверу — ВСЕГДА direct, чтобы исключить петлю маршрутизации
         val serverHost = config.address.trim()
         if (serverHost.isNotEmpty()) {
             if (isIpAddress(serverHost)) {

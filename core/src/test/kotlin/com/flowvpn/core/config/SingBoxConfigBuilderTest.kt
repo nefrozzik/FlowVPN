@@ -155,12 +155,21 @@ class SingBoxConfigBuilderTest {
         var foundProxyDomainDirect = false
         var foundBypassLan = false
 
+        var foundPort853Block = false
+        var foundQuicBlock = false
+
         for (rule in rulesDomain) {
             if (rule["protocol"] == "dns" && rule["outbound"] == "dns-out") {
                 foundDnsProtoOut = true
             }
             if ((rule["port"] as? List<*>)?.firstOrNull() == 53.0 && rule["outbound"] == "dns-out") {
                 foundDnsPortOut = true
+            }
+            if ((rule["port"] as? List<*>)?.firstOrNull() == 853.0 && rule["outbound"] == "block") {
+                foundPort853Block = true
+            }
+            if ((rule["port"] as? List<*>)?.firstOrNull() == 443.0 && rule["network"] == "udp" && rule["outbound"] == "block") {
+                foundQuicBlock = true
             }
             if ((rule["domain"] as? List<*>)?.firstOrNull() == "vpn.flowvpn.example.com" &&
                 rule["outbound"] == "direct") {
@@ -173,6 +182,8 @@ class SingBoxConfigBuilderTest {
 
         assertTrue("DNS protocol routed to dns-out", foundDnsProtoOut)
         assertTrue("Port 53 routed to dns-out", foundDnsPortOut)
+        assertTrue("Port 853 routed to block", foundPort853Block)
+        assertTrue("QUIC UDP 443 routed to block", foundQuicBlock)
         assertTrue("Proxy domain routed to direct", foundProxyDomainDirect)
         assertTrue("Bypass LAN ip_is_private routed to direct", foundBypassLan)
 

@@ -320,23 +320,16 @@ class FlowVpnService : VpnService() {
                 val dnsToUse = if (!coreDns.isNullOrBlank()) coreDns else "172.19.0.2"
                 try {
                     addDnsServer(dnsToUse)
-                    if (dnsToUse != primaryDns && primaryDns.isNotBlank()) {
-                        try { addDnsServer(primaryDns) } catch (_: Exception) {}
-                    }
-                    Timber.d("addDnsServer: $dnsToUse (secondary: $primaryDns)")
+                    Timber.d("addDnsServer: $dnsToUse")
                 } catch (e: Exception) {
                     Timber.w(e, "addDnsServer($dnsToUse) failed, fallback to 172.19.0.2")
                     try { addDnsServer("172.19.0.2") } catch (_: Exception) {}
-                    try { addDnsServer("1.1.1.1") } catch (_: Exception) {}
                 }
 
-                // Samsung Android: явные маршруты для DNS
-                if (Build.BRAND.equals("samsung", ignoreCase = true)) {
-                    val dnsList = listOf(dnsToUse, "172.19.0.2", primaryDns, secondaryDns).distinct()
-                    for (dns in dnsList) {
-                        try { addRoute(dns, 32) } catch (_: Exception) {}
-                    }
-                }
+                // Явный /32 маршрут до локального DNS ядра гарантирует доставку в TUN
+                try {
+                    addRoute(dnsToUse, 32)
+                } catch (_: Exception) {}
 
                 // Исключение прямого маршрута до хоста прокси (Android 13+)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && server != null) {
@@ -355,13 +348,10 @@ class FlowVpnService : VpnService() {
 
                 // По умолчанию Android VpnService НЕ разрешает обход (bypass disallowed).
                 // Мы сознательно не вызываем allowBypass(), гарантируя строгость изоляции трафика.
+                // Также НЕ вызываем setUnderlyingNetworks с фиксированной сетью: без него Android OS
+                // автоматически следует за текущей дефолтной сетью при переключениях и ребутах.
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     setMetered(false)
-                    DefaultNetworkMonitor.defaultNetwork?.let {
-                        try {
-                            setUnderlyingNetworks(arrayOf(it))
-                        } catch (_: Exception) {}
-                    }
                 }
 
                 applySplitTunneling(this, options)

@@ -48,7 +48,6 @@ object LocalResolver : LocalDNSTransport {
                         ctx.onCancel {
                             signal.cancel()
                             if (resumed.compareAndSet(false, true)) {
-                                runCatching { ctx.errorCode(RCODE_NXDOMAIN) }
                                 runCatching { continuation.resume(Unit) }
                             }
                         }
@@ -112,7 +111,6 @@ object LocalResolver : LocalDNSTransport {
                             ctx.onCancel {
                                 signal.cancel()
                                 if (resumed.compareAndSet(false, true)) {
-                                    runCatching { ctx.errorCode(RCODE_NXDOMAIN) }
                                     runCatching { continuation.resume(Unit) }
                                 }
                             }
