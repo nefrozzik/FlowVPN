@@ -6,6 +6,7 @@ import com.flowvpn.core.logger.LogLevel
 import com.hiddify.core.libbox.CommandServer
 import com.hiddify.core.libbox.CommandServerHandler
 import com.hiddify.core.libbox.Libbox
+import com.hiddify.core.libbox.OverrideOptions
 import com.hiddify.core.libbox.SetupOptions
 import com.hiddify.core.libbox.SystemProxyStatus
 import kotlinx.coroutines.CoroutineScope
@@ -123,7 +124,8 @@ class BoxServiceManager(
                         val path = currentConfigPath ?: return@launch
                         val file = File(path)
                         if (file.exists()) {
-                            commandServer?.startOrReloadService(file.readText(), null)
+                            val options = OverrideOptions()
+                            commandServer?.startOrReloadService(file.readText(), options)
                             CoreLogManager.log("Sing-box: сервис успешно перезагружен", LogLevel.INFO, tag = "SingBox")
                         }
                     } catch (t: Throwable) {
@@ -161,7 +163,8 @@ class BoxServiceManager(
         try {
             server.start()
             CoreLogManager.log("Запуск службы Sing-box с VLESS Reality/Vision...", LogLevel.INFO, tag = "SingBox")
-            server.startOrReloadService(configContent, null)
+            val options = OverrideOptions()
+            server.startOrReloadService(configContent, options)
         } catch (t: Throwable) {
             Timber.e(t, "BoxServiceManager: Ошибка при запуске CommandServer / сервиса Sing-box")
             stop()
