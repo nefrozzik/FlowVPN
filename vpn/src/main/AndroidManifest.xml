@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        VPN-модуль регистрирует FlowVpnService.
+        Permissions объявляются в :app модуле — они мержатся при сборке.
+    -->
+
+    <application>
+        <!--
+            FlowVpnService — Android VPN-сервис.
+
+            android:permission="BIND_VPN_SERVICE" — только система может биндить этот сервис.
+            android:foregroundServiceType="specialUse" — API 34+ требует тип foreground service.
+            android:exported="false" — сервис доступен только внутри приложения.
+
+            intent-filter с action "android.net.VpnService" помечает сервис как VPN —
+            это позволяет системе показать его в настройках VPN (Settings > Network > VPN).
+
+            SUPPORTS_ALWAYS_ON позволяет пользователю включить "Always-on VPN" в настройках,
+            что будет автоматически запускать FlowVpnService при загрузке устройства.
+        -->
+        <service
+            android:name="com.flowvpn.vpn.FlowVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn" />
+            <meta-data
+                android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"
+                android:value="true" />
+        </service>
+    </application>
+
+</manifest>

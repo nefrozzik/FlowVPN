@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Network Security Configuration.
+    Разрешаем cleartext (HTTP) для подписочных URL,
+    которые могут использовать HTTP (не все провайдеры поддерживают HTTPS).
+    В production рекомендуется ограничить до конкретных доменов.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

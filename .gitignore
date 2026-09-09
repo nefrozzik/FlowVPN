@@ -1,0 +1,21 @@
+# Built outputs
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Module build directories
+app/build/
+core/build/
+vpn/build/
+
+# libbox.aar — не коммитим бинарники (скачивается отдельно)
+vpn/libs/libbox.aar
+
+*.apk
