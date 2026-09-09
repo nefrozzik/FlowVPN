@@ -163,6 +163,38 @@ class FileSubscriptionRepository(
         servers.size
     }
 
+    override suspend fun addServer(server: ProxyServerConfig): Boolean = withContext(ioDispatcher) {
+        ensureLoaded()
+        mutex.withLock {
+            val current = _subscriptions.value.toMutableList()
+            val importedId = "imported_manual_profile"
+            val existingIndex = current.indexOfFirst { it.id == importedId }
+
+            if (existingIndex >= 0) {
+                val existing = current[existingIndex]
+                val updatedServers = (listOf(server) + existing.servers).distinctBy { it.id }
+                current[existingIndex] = existing.copy(
+                    servers = updatedServers,
+                    lastUpdatedMs = System.currentTimeMillis()
+                )
+            } else {
+                current.add(
+                    0,
+                    SubscriptionInfo(
+                        id = importedId,
+                        name = "Ручной импорт",
+                        url = "",
+                        lastUpdatedMs = System.currentTimeMillis(),
+                        servers = listOf(server)
+                    )
+                )
+            }
+            _subscriptions.value = current
+            saveToFileLocked(current)
+        }
+        true
+    }
+
     private fun ensureInitialized() {
         if (!isInitialized) {
             try {
@@ -227,6 +259,10 @@ class FileSubscriptionRepository(
                         putOpt("privateKey", s.privateKey)
                         putOpt("peerPublicKey", s.peerPublicKey)
                         putOpt("preSharedKey", s.preSharedKey)
+                        putOpt("openfluxTransport", s.openfluxTransport)
+                        putOpt("openfluxDocUrl", s.openfluxDocUrl)
+                        putOpt("openfluxToken", s.openfluxToken)
+                        putOpt("openfluxUid", s.openfluxUid)
                         putOpt("subscriptionId", s.subscriptionId ?: sub.id)
                         putOpt("latencyMs", s.latencyMs)
                         putOpt("country", s.country)
@@ -320,6 +356,10 @@ class FileSubscriptionRepository(
                         privateKey = sObj.optString("privateKey").takeIf { it.isNotEmpty() },
                         peerPublicKey = sObj.optString("peerPublicKey").takeIf { it.isNotEmpty() },
                         preSharedKey = sObj.optString("preSharedKey").takeIf { it.isNotEmpty() },
+                        openfluxTransport = sObj.optString("openfluxTransport").takeIf { it.isNotEmpty() },
+                        openfluxDocUrl = sObj.optString("openfluxDocUrl").takeIf { it.isNotEmpty() },
+                        openfluxToken = sObj.optString("openfluxToken").takeIf { it.isNotEmpty() },
+                        openfluxUid = sObj.optString("openfluxUid").takeIf { it.isNotEmpty() },
                         subscriptionId = sObj.optString("subscriptionId").takeIf { it.isNotEmpty() },
                         latencyMs = if (sObj.has("latencyMs")) sObj.getInt("latencyMs") else null,
                         country = sObj.optString("country").takeIf { it.isNotEmpty() },

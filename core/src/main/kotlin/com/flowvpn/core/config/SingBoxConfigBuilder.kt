@@ -27,6 +27,17 @@ import com.flowvpn.core.model.ProxyServerConfig
 object SingBoxConfigBuilder {
 
     /**
+     * Домены транспортных сервисов OpenFlux (Яндекс Документы, OneMe/MAX, VK).
+     * Должны ВСЕГДА идти в direct и резолвиться через direct-dns при работе OpenFlux,
+     * иначе трафик скрытого туннеля захватится интерфейсом TUN и произойдет вечная петля.
+     */
+    private val OPENFLUX_CARRIER_DOMAINS = listOf(
+        "yandex.ru", "yandex.net", "ya.ru", "doc.yandex.ru", "docs.yandex.ru",
+        "disk.yandex.ru", "passport.yandex.ru", "oneme.ru", "vk.com", "vk.me",
+        "userapi.com", "vk-portal.net"
+    )
+
+    /**
      * Собрать полную конфигурацию sing-box для указанного сервера с настройками сети.
      *
      * @param config конфигурация прокси-сервера
@@ -115,6 +126,7 @@ object SingBoxConfigBuilder {
             ProxyProtocol.WIREGUARD -> buildWireguardFields(config)
             ProxyProtocol.SOCKS5 -> buildSocksFields(config)
             ProxyProtocol.HTTP -> buildHttpFields(config)
+            ProxyProtocol.OPENFLUX -> buildSocksFields(config)
         }
 
         return "{$base,$protocolFields}"
@@ -461,6 +473,19 @@ object SingBoxConfigBuilder {
             }
         """.trimIndent()
 
+        // 2.1. Защита от зацикливания OpenFlux: домены Яндекса и MAX в direct-dns
+        val isOpenFlux = config.protocol == ProxyProtocol.OPENFLUX ||
+                (config.protocol == ProxyProtocol.SOCKS5 && (config.address == "127.0.0.1" || config.address == "localhost"))
+        if (isOpenFlux) {
+            val carrierDomainsJson = OPENFLUX_CARRIER_DOMAINS.joinToString(",") { "\"$it\"" }
+            dnsRules += """
+                {
+                    "domain_suffix": [$carrierDomainsJson],
+                    "server": "direct-dns"
+                }
+            """.trimIndent()
+        }
+
         // 3. Сайты РФ и кастомные домены обхода всегда через direct-dns (системный резолвер устройства)
         if (settings.bypassRussianTraffic || settings.customBypassDomains.isNotEmpty()) {
             val bypassList = mutableListOf<String>()
@@ -587,7 +612,26 @@ object SingBoxConfigBuilder {
             }
         }
 
-        // 3. Блокировка IPv6 при включенной защите от утечек
+        // 4.1. Защита от зацикливания OpenFlux (локальный туннель к Яндекс/MAX)
+        val isOpenFlux = config.protocol == ProxyProtocol.OPENFLUX ||
+                (config.protocol == ProxyProtocol.SOCKS5 && (config.address == "127.0.0.1" || config.address == "localhost"))
+        if (isOpenFlux) {
+            rules += """
+                {
+                    "ip_cidr": ["127.0.0.0/8", "::1/128"],
+                    "outbound": "direct"
+                }
+            """.trimIndent()
+            val carrierDomainsJson = OPENFLUX_CARRIER_DOMAINS.joinToString(",") { "\"$it\"" }
+            rules += """
+                {
+                    "domain_suffix": [$carrierDomainsJson],
+                    "outbound": "direct"
+                }
+            """.trimIndent()
+        }
+
+        // 5. Блокировка IPv6 при включенной защите от утечек
         if (settings.blockIpv6) {
             rules += """
                 {
@@ -658,5 +702,6 @@ object SingBoxConfigBuilder {
             ProxyProtocol.WIREGUARD -> "wireguard"
             ProxyProtocol.SOCKS5 -> "socks"
             ProxyProtocol.HTTP -> "http"
+            ProxyProtocol.OPENFLUX -> "socks"
         }
 }

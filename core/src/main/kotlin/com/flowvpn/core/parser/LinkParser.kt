@@ -69,6 +69,13 @@ object LinkParser {
                 trimmed.startsWith("wg://", ignoreCase = true) ->
                     WireguardParser.parse(trimmed)
 
+                trimmed.startsWith("openflux://", ignoreCase = true) ->
+                    OpenFluxParser.parse(trimmed)
+
+                trimmed.startsWith("socks5://", ignoreCase = true) ||
+                trimmed.startsWith("socks://", ignoreCase = true) ->
+                    Socks5Parser.parse(trimmed)
+
                 else -> null
             }
         } catch (e: Exception) {
@@ -106,7 +113,10 @@ object LinkParser {
                 t.startsWith("hy2://") ||
                 t.startsWith("tuic://") ||
                 t.startsWith("wireguard://") ||
-                t.startsWith("wg://")
+                t.startsWith("wg://") ||
+                t.startsWith("openflux://") ||
+                t.startsWith("socks5://") ||
+                t.startsWith("socks://")
     }
 }
 

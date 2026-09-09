@@ -104,4 +104,26 @@ class ServersViewModel(application: Application) : AndroidViewModel(application)
             _serverLatencies.value = current
         }
     }
+
+    fun addOpenFluxServer(server: ProxyServerConfig, selectImmediately: Boolean = true) {
+        viewModelScope.launch {
+            repository.addServer(server)
+            if (selectImmediately) {
+                selectServer(server)
+            }
+        }
+    }
+
+    suspend fun checkLocalSocket(host: String = "127.0.0.1", port: Int = 10808, timeoutMs: Int = 1500): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                Socket().use { socket ->
+                    socket.connect(InetSocketAddress(host, port), timeoutMs)
+                    true
+                }
+            } catch (_: Exception) {
+                false
+            }
+        }
+    }
 }

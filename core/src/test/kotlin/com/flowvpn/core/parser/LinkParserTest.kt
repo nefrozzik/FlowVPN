@@ -3,6 +3,7 @@ package com.flowvpn.core.parser
 import com.flowvpn.core.config.SingBoxConfigBuilder
 import com.flowvpn.core.model.ProxyProtocol
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -239,5 +240,35 @@ class LinkParserTest {
         val configJson = SingBoxConfigBuilder.build(server!!)
         assertTrue(configJson.contains("\"reality\""))
         assertFalse(configJson.contains("\"type\": \"raw\""))
+    }
+
+    @Test
+    fun testParseOpenFluxYandex() {
+        val link = "openflux://yandex?docUrl=https%3A%2F%2Fdocs.yandex.ru%2Fdocs%2Fview%3Fid%3Dtest123&port=10808#YandexDocs"
+        val server = LinkParser.parse(link)
+        assertNotNull(server)
+        assertEquals("YandexDocs", server?.name)
+        assertEquals(ProxyProtocol.OPENFLUX, server?.protocol)
+        assertEquals("127.0.0.1", server?.address)
+        assertEquals(10808, server?.port)
+        assertEquals("yandex", server?.openfluxTransport)
+        assertEquals("https://docs.yandex.ru/docs/view?id=test123", server?.openfluxDocUrl)
+
+        val configJson = SingBoxConfigBuilder.build(server!!)
+        assertTrue(configJson.contains("\"type\": \"socks\""))
+        assertTrue(configJson.contains("doc.yandex.ru"))
+        assertTrue(configJson.contains("127.0.0.0/8"))
+    }
+
+    @Test
+    fun testParseSocks5() {
+        val link = "socks5://user:secret@127.0.0.1:10808#LocalSocks"
+        val server = LinkParser.parse(link)
+        assertNotNull(server)
+        assertEquals("LocalSocks", server?.name)
+        assertEquals(ProxyProtocol.SOCKS5, server?.protocol)
+        assertEquals("127.0.0.1", server?.address)
+        assertEquals(10808, server?.port)
+        assertEquals("secret", server?.password)
     }
 }

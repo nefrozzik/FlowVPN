@@ -90,6 +90,20 @@ data class ProxyServerConfig(
     /** WireGuard MTU */
     val wireguardMtu: Int? = null,
 
+    // ─── OpenFlux (Белые списки) ───
+
+    /** Транспорт OpenFlux: "yandex" (Яндекс Документы), "max" (MAX Messenger), "direct" */
+    val openfluxTransport: String? = null,
+
+    /** Ссылка на документ Яндекс Документов */
+    val openfluxDocUrl: String? = null,
+
+    /** Токен для MAX Messenger */
+    val openfluxToken: String? = null,
+
+    /** User ID / Peer ID для MAX Messenger */
+    val openfluxUid: String? = null,
+
     // ─── Мета-информация ───
 
     /** ID подписки, из которой получен сервер */
@@ -121,6 +135,10 @@ data class ProxyServerConfig(
             putOpt("privateKey", privateKey)
             putOpt("peerPublicKey", peerPublicKey)
             putOpt("preSharedKey", preSharedKey)
+            putOpt("openfluxTransport", openfluxTransport)
+            putOpt("openfluxDocUrl", openfluxDocUrl)
+            putOpt("openfluxToken", openfluxToken)
+            putOpt("openfluxUid", openfluxUid)
             putOpt("subscriptionId", subscriptionId)
             putOpt("latencyMs", latencyMs)
             putOpt("country", country)
@@ -205,6 +223,10 @@ data class ProxyServerConfig(
                 privateKey = sObj.optString("privateKey").takeIf { it.isNotEmpty() },
                 peerPublicKey = sObj.optString("peerPublicKey").takeIf { it.isNotEmpty() },
                 preSharedKey = sObj.optString("preSharedKey").takeIf { it.isNotEmpty() },
+                openfluxTransport = sObj.optString("openfluxTransport").takeIf { it.isNotEmpty() },
+                openfluxDocUrl = sObj.optString("openfluxDocUrl").takeIf { it.isNotEmpty() },
+                openfluxToken = sObj.optString("openfluxToken").takeIf { it.isNotEmpty() },
+                openfluxUid = sObj.optString("openfluxUid").takeIf { it.isNotEmpty() },
                 subscriptionId = sObj.optString("subscriptionId").takeIf { it.isNotEmpty() },
                 latencyMs = if (sObj.has("latencyMs")) sObj.getInt("latencyMs") else null,
                 country = sObj.optString("country").takeIf { it.isNotEmpty() },
@@ -229,6 +251,7 @@ enum class ProxyProtocol(val displayName: String, val uriScheme: String) {
     WIREGUARD("WireGuard", "wireguard"),
     SOCKS5("SOCKS5", "socks5"),
     HTTP("HTTP", "http"),
+    OPENFLUX("OpenFlux", "openflux"),
 }
 
 /**

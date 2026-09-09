@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.AltRoute
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.filled.BatterySaver
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
@@ -31,6 +32,9 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
+import com.flowvpn.app.ui.screens.servers.OpenFluxDialog
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -93,6 +97,7 @@ fun SettingsScreen(
     var showResetDialog by remember { mutableStateOf(false) }
     var showUpdateIntervalDialog by remember { mutableStateOf(false) }
     var showBypassDomainsDialog by remember { mutableStateOf(false) }
+    var showOpenFluxDialog by remember { mutableStateOf(false) }
     var isManualUpdating by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -149,6 +154,16 @@ fun SettingsScreen(
                     title = "Список сайтов для обхода РФ",
                     subtitle = bypassSubtitle,
                     onClick = { showBypassDomainsDialog = true }
+                )
+            }
+
+            // Обход «белых списков» (OpenFlux)
+            item {
+                SettingsClickableCard(
+                    icon = Icons.Default.Bolt,
+                    title = "Обход «белых списков» (OpenFlux)",
+                    subtitle = "Скрытый туннель через Яндекс Документы и MAX при блокировках",
+                    onClick = { showOpenFluxDialog = true }
                 )
             }
 
@@ -877,6 +892,31 @@ fun SettingsScreen(
             confirmButton = {
                 TextButton(onClick = { showBypassDomainsDialog = false }) {
                     Text("Готово")
+                }
+            }
+        )
+    }
+
+    if (showOpenFluxDialog) {
+        OpenFluxDialog(
+            onDismiss = { showOpenFluxDialog = false },
+            onSaveServer = { newServer ->
+                scope.launch {
+                    container.subscriptionRepository.addServer(newServer)
+                    container.selectServer(newServer)
+                    snackbarHostState.showSnackbar("Профиль «${newServer.name}» сохранен и выбран")
+                }
+            },
+            onCheckSocket = { host, port ->
+                withContext(Dispatchers.IO) {
+                    try {
+                        java.net.Socket().use { socket ->
+                            socket.connect(java.net.InetSocketAddress(host, port), 1500)
+                            true
+                        }
+                    } catch (_: Exception) {
+                        false
+                    }
                 }
             }
         )

@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.NetworkCheck
@@ -41,6 +42,9 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -63,6 +67,20 @@ fun ServersScreen(
     val selectedServer by viewModel.selectedServer.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val isPinging by viewModel.isPinging.collectAsState()
+    var showOpenFluxDialog by remember { mutableStateOf(false) }
+
+    if (showOpenFluxDialog) {
+        OpenFluxDialog(
+            onDismiss = { showOpenFluxDialog = false },
+            onSaveServer = { newServer ->
+                viewModel.addOpenFluxServer(newServer, selectImmediately = true)
+                onServerSelected(newServer)
+            },
+            onCheckSocket = { host, port ->
+                viewModel.checkLocalSocket(host, port)
+            }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -108,8 +126,55 @@ fun ServersScreen(
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
             )
+
+            // Баннер: Обход белых списков (OpenFlux)
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.35f)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .clickable { showOpenFluxDialog = true }
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.tertiary.copy(alpha = 0.2f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Bolt,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Обход белых списков (OpenFlux)",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Скрытый туннель через Яндекс Документы и MAX",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
 
             if (servers.isEmpty()) {
                 Box(
@@ -200,6 +265,13 @@ private fun ServerListItem(
                 ) {
                     ProtocolBadge(protocol = server.protocol)
 
+                    if (server.protocol == ProxyProtocol.OPENFLUX) {
+                        BadgeText(
+                            text = if (server.openfluxTransport == "max") "MAX" else "ЯНДЕКС",
+                            color = Color(0xFFD32F2F)
+                        )
+                    }
+
                     server.transport?.let { t ->
                         BadgeText(text = t.type.uppercase())
                     }
@@ -242,6 +314,7 @@ private fun ProtocolBadge(protocol: ProxyProtocol) {
         ProxyProtocol.WIREGUARD -> Color(0xFF880E4F) to Color.White
         ProxyProtocol.SOCKS5 -> Color(0xFF00796B) to Color.White
         ProxyProtocol.HTTP -> Color(0xFF455A64) to Color.White
+        ProxyProtocol.OPENFLUX -> Color(0xFF00897B) to Color.White
     }
 
     Box(

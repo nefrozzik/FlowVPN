@@ -1,5 +1,6 @@
 package com.flowvpn.core.subscription
 
+import com.flowvpn.core.model.ProxyServerConfig
 import com.flowvpn.core.model.SubscriptionInfo
 import kotlinx.coroutines.flow.Flow
 
@@ -59,4 +60,13 @@ interface SubscriptionRepository {
      * @return количество импортированных серверов
      */
     suspend fun importFromText(content: String): Int
+
+    /**
+     * Добавить одиночный сервер (например, OpenFlux или кастомный профиль).
+     * Добавляет сервер в группу "Ручной импорт".
+     *
+     * @param server конфигурация сервера
+     * @return true при успехе
+     */
+    suspend fun addServer(server: ProxyServerConfig): Boolean
 }
