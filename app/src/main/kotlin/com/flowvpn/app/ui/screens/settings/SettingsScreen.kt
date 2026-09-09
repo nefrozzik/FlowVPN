@@ -17,12 +17,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.AltRoute
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.filled.BatterySaver
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.WifiTethering
@@ -367,6 +370,42 @@ fun SettingsScreen(
                     title = "Логи ядра (Core Log Viewer)",
                     subtitle = "Просмотр системных сообщений, маршрутов и событий sing-box",
                     onClick = onNavigateToLogs
+                )
+            }
+
+            // Подробный сбор логов приложения (Файловый лог)
+            item {
+                SettingsSwitchCard(
+                    icon = Icons.Default.BugReport,
+                    title = "Сбор логов приложения в файл",
+                    subtitle = "Запись логов интерфейса, сервиса и ядра на диск для детальной отладки (по умолчанию выкл)",
+                    checked = settings.fileLoggingEnabled,
+                    onCheckedChange = { scope.launch { settingsRepo.setFileLoggingEnabled(it) } }
+                )
+            }
+
+            // Экспорт логов приложения
+            item {
+                SettingsClickableCard(
+                    icon = Icons.Default.Share,
+                    title = "Экспорт логов приложения",
+                    subtitle = "Сформировать файл с системной диагностикой, логами и отчетом о вылете приложения",
+                    onClick = {
+                        com.flowvpn.app.util.LogExportHelper.exportAndShareLogs(context)
+                    }
+                )
+            }
+
+            // Очистка файлов логов
+            item {
+                SettingsClickableCard(
+                    icon = Icons.Default.Delete,
+                    title = "Очистить сохраненные логи",
+                    subtitle = "Удалить файлы app_debug.log и сохраненные отчеты об ошибках",
+                    onClick = {
+                        com.flowvpn.core.logger.AppLogManager.clearAllLogs()
+                        scope.launch { snackbarHostState.showSnackbar("Файлы логов и отчеты о падениях очищены") }
+                    }
                 )
             }
 

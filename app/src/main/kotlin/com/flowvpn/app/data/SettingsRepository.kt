@@ -79,6 +79,10 @@ class SettingsRepository(
         it.copy(rootTethering = enabled)
     }
 
+    suspend fun setFileLoggingEnabled(enabled: Boolean) = update {
+        it.copy(fileLoggingEnabled = enabled)
+    }
+
     suspend fun resetToDefaults() = update {
         AppSettings()
     }
@@ -87,6 +91,7 @@ class SettingsRepository(
         val current = _settings.value
         val updated = transform(current)
         _settings.value = updated
+        com.flowvpn.core.logger.AppLogManager.isFileLoggingEnabled = updated.fileLoggingEnabled
         saveSettings(updated)
     }
 
@@ -104,7 +109,7 @@ class SettingsRepository(
                 DnsProvider.CLOUDFLARE
             }
 
-            AppSettings(
+            val loaded = AppSettings(
                 dnsProvider = dnsProvider,
                 customDnsUrl = json.optString("customDnsUrl", "https://dns.google/dns-query"),
                 bypassLan = json.optBoolean("bypassLan", true),
@@ -118,7 +123,10 @@ class SettingsRepository(
                 autoUpdateSubscriptions = json.optBoolean("autoUpdateSubscriptions", true),
                 autoUpdateIntervalHours = json.optInt("autoUpdateIntervalHours", 24),
                 rootTethering = json.optBoolean("rootTethering", false),
+                fileLoggingEnabled = json.optBoolean("fileLoggingEnabled", false),
             )
+            com.flowvpn.core.logger.AppLogManager.isFileLoggingEnabled = loaded.fileLoggingEnabled
+            loaded
         } catch (e: Exception) {
             Timber.e(e, "Ошибка чтения settings.json, используются значения по умолчанию")
             AppSettings()
@@ -141,6 +149,7 @@ class SettingsRepository(
                 put("autoUpdateSubscriptions", settings.autoUpdateSubscriptions)
                 put("autoUpdateIntervalHours", settings.autoUpdateIntervalHours)
                 put("rootTethering", settings.rootTethering)
+                put("fileLoggingEnabled", settings.fileLoggingEnabled)
             }
             settingsFile.writeText(json.toString(2))
         } catch (e: Exception) {

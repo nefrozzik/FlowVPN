@@ -58,6 +58,9 @@ object CoreLogManager {
         }
 
         _logs.value = queue.toList()
+
+        // Дублируем в файловый логгер приложения
+        AppLogManager.log(tag, entry.level, message)
     }
 
     fun clear() {

@@ -39,13 +39,37 @@ class LogsViewModel : ViewModel() {
         _selectedLevel.value = level
     }
 
+    private val _crashReport = MutableStateFlow<String?>(null)
+    val crashReport: StateFlow<String?> = _crashReport.asStateFlow()
+
+    init {
+        checkCrashReport()
+    }
+
+    fun checkCrashReport() {
+        _crashReport.value = com.flowvpn.core.logger.AppLogManager.getCrashReport()
+    }
+
+    fun clearCrashReport() {
+        com.flowvpn.core.logger.AppLogManager.clearCrashReport()
+        _crashReport.value = null
+    }
+
     fun clearLogs() {
         CoreLogManager.clear()
+        com.flowvpn.core.logger.AppLogManager.clearAllLogs()
+        _crashReport.value = null
     }
 
     fun getAllLogsText(): String {
-        return filteredLogs.value.joinToString("\n") {
+        val crash = _crashReport.value
+        val logsText = filteredLogs.value.joinToString("\n") {
             "[${it.formattedTime}] [${it.level.name}] [${it.tag}]: ${it.message}"
+        }
+        return if (!crash.isNullOrBlank()) {
+            "=== CRASH REPORT ===\n$crash\n\n=== LOGS ===\n$logsText"
+        } else {
+            logsText
         }
     }
 }

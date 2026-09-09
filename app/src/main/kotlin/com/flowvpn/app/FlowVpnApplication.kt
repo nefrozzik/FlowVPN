@@ -19,6 +19,11 @@ class FlowVpnApplication : Application() {
         super.onCreate()
         container = com.flowvpn.app.di.AppContainer(this)
 
+        // Инициализируем централизованный файловый логгер и перехватчик сбоев
+        com.flowvpn.core.logger.AppLogManager.init(this)
+        com.flowvpn.core.logger.AppLogManager.isFileLoggingEnabled =
+            container.settingsRepository.settings.value.fileLoggingEnabled
+
         // Timber — логирование (только в debug-сборках)
         if (com.flowvpn.app.BuildConfig.DEBUG) {
             Timber.plant(Timber.DebugTree())

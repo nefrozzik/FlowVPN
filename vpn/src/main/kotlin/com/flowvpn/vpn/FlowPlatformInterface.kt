@@ -44,21 +44,19 @@ class FlowPlatformInterface(
      * Критически важно: без этого исходящие пакеты прокси зацикливаются в TUN.
      */
     override fun autoDetectInterfaceControl(fd: Int) {
-        var success = false
-        for (attempt in 0 until 3) {
-            try {
-                if (vpnService.protect(fd)) {
-                    success = true
-                    break
-                }
-            } catch (t: Throwable) {
-                Timber.w(t, "autoDetectInterfaceControl: попытка $attempt защиты fd=$fd не удалась")
+        val success = runCatching {
+            var protected = false
+            for (i in 1..3) {
+                protected = vpnService.protect(fd)
+                if (protected) break
+                try { Thread.sleep(10) } catch (_: InterruptedException) {}
             }
-            try { Thread.sleep(10) } catch (_: InterruptedException) {}
-        }
+            protected
+        }.getOrDefault(false)
+
         if (!success) {
-            Timber.e("FlowPlatformInterface: КРИТИЧЕСКАЯ ОШИБКА: Не удалось защитить сокет fd=$fd через VpnService.protect()")
-            throw java.io.IOException("VpnService.protect(fd=$fd) failed")
+            CoreLogManager.log("Критическая ошибка: не удалось защитить сокет sing-box (protect() failed).", LogLevel.ERROR, tag = "SingBox")
+            // Убрали throw, чтобы избежать JNI DETECTED ERROR IN APPLICATION крашей (система сама дропнет пакет или уйдет в таймаут)
         }
     }
 
@@ -70,9 +68,9 @@ class FlowPlatformInterface(
             Timber.i("FlowPlatformInterface: Запрос openTun(mtu=${options.mtu}, autoRoute=${options.autoRoute})")
             vpnService.createTunInterface(options)
         } catch (t: Throwable) {
-            Timber.e(t, "FlowPlatformInterface: openTun failed")
-            CoreLogManager.log("Ошибка создания TUN: ${t.message}", LogLevel.ERROR, tag = "VPN")
-            throw t
+            Timber.e(t, "FlowPlatformInterface: Ошибка при вызове Builder.establish()")
+            CoreLogManager.log("openTun failed: ${t.message}", LogLevel.ERROR, tag = "SingBox")
+            return -1
         }
     }
 

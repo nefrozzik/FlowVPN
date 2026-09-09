@@ -75,6 +75,7 @@ data class AppSettings(
     val autoUpdateSubscriptions: Boolean = true,
     val autoUpdateIntervalHours: Int = 24,
     val rootTethering: Boolean = false,
+    val fileLoggingEnabled: Boolean = false,
 ) {
     /**
      * Получить эффективный адрес DNS для передачи в конфигурацию sing-box.
