@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.VpnKey
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -44,6 +45,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -78,6 +80,8 @@ fun WarpSettingsDialog(
     onAddServer: (ProxyServerConfig) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val vpnState by com.flowvpn.core.state.VpnStateManager.vpnState.collectAsState()
+    val isVpnConnected = vpnState is com.flowvpn.core.model.VpnState.Connected
 
     var enableChaining by remember { mutableStateOf(settings.enableWarpChaining) }
     var licenseKey by remember { mutableStateOf(settings.warpLicenseKey) }
@@ -90,8 +94,19 @@ fun WarpSettingsDialog(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var serverAddedMessage by remember { mutableStateOf(false) }
     var showImportDialog by remember { mutableStateOf(false) }
+    var showVpnWarningDialog by remember { mutableStateOf(false) }
+    var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var importText by remember { mutableStateOf("") }
     var importError by remember { mutableStateOf<String?>(null) }
+
+    fun executeWithVpnCheck(action: () -> Unit) {
+        if (!isVpnConnected) {
+            pendingAction = action
+            showVpnWarningDialog = true
+        } else {
+            action()
+        }
+    }
 
     var isScanning by remember { mutableStateOf(false) }
     var scanCompleted by remember { mutableStateOf(false) }
@@ -175,24 +190,26 @@ fun WarpSettingsDialog(
                             onCheckedChange = { checked ->
                                 if (checked && currentWarpConfig == null) {
                                     // Автоматически регистрируем аккаунт, если еще нет
-                                    currentJob = scope.launch {
-                                        isLoading = true
-                                        statusMessage = "Регистрация аккаунта Cloudflare..."
-                                        errorMessage = null
-                                        val result = WarpManager.register(licenseKey.ifBlank { null })
-                                        if (result.isSuccess) {
-                                            val cfg = result.getOrNull()
-                                            currentWarpConfig = cfg
-                                            enableChaining = true
-                                            if (licenseKey.isNotBlank() && cfg?.accountType != "warp_plus") {
-                                                statusMessage = "Аккаунт WARP создан (бесплатный). Ключ не привязался (см. Логи)."
+                                    executeWithVpnCheck {
+                                        currentJob = scope.launch {
+                                            isLoading = true
+                                            statusMessage = "Регистрация аккаунта Cloudflare..."
+                                            errorMessage = null
+                                            val result = WarpManager.register(licenseKey.ifBlank { null })
+                                            if (result.isSuccess) {
+                                                val cfg = result.getOrNull()
+                                                currentWarpConfig = cfg
+                                                enableChaining = true
+                                                if (licenseKey.isNotBlank() && cfg?.accountType != "warp_plus") {
+                                                    statusMessage = "Аккаунт WARP создан (бесплатный). Ключ не привязался (см. Логи)."
+                                                } else {
+                                                    statusMessage = "Аккаунт WARP успешно создан!"
+                                                }
                                             } else {
-                                                statusMessage = "Аккаунт WARP успешно создан!"
+                                                errorMessage = result.exceptionOrNull()?.message ?: "Ошибка регистрации"
                                             }
-                                        } else {
-                                            errorMessage = result.exceptionOrNull()?.message ?: "Ошибка регистрации"
+                                            isLoading = false
                                         }
-                                        isLoading = false
                                     }
                                 } else {
                                     enableChaining = checked
@@ -202,31 +219,81 @@ fun WarpSettingsDialog(
                     }
                 }
 
-                // Подсказка для пользователей из РФ (при ошибках блокировки / таймаутах)
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.45f)
-                    ),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.Top
+                // Статус VPN и подсказка для пользователей из РФ
+                if (isVpnConnected) {
+                    val serverName = (vpnState as? com.flowvpn.core.model.VpnState.Connected)?.serverName ?: "VPN"
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color(0xFF2E7D32).copy(alpha = 0.12f)
+                        ),
+                        shape = RoundedCornerShape(12.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Lightbulb,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.tertiary,
-                            modifier = Modifier.size(20.dp).padding(top = 2.dp)
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = "В РФ серверы Cloudflare API блокируются провайдерами (ошибка таймаута). Чтобы создать аккаунт: сначала включите VPN на главном экране (любой сервер VLESS/Shadowsocks) и нажмите «Создать аккаунт» здесь (запрос пойдет через защищенный VPN-туннель). Либо нажмите «Импортировать конфиг» ниже.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onTertiaryContainer,
-                            lineHeight = 16.sp
-                        )
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = Color(0xFF2E7D32),
+                                modifier = Modifier.size(20.dp).padding(top = 2.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = "VPN подключен: $serverName",
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFF2E7D32)
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Локальный прокси sing-box активен (127.0.0.1:2080). Создание аккаунта и привязка ключа Cloudflare пойдут в обход ТСПУ через защищенный VPN-туннель!",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    lineHeight = 15.sp,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(20.dp).padding(top = 2.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = "Внимание: VPN отключен!",
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "В РФ Cloudflare API заблокирован ТСПУ (вызывает ошибку «Read timed out»). Чтобы зарегистрировать аккаунт или привязать ключ: сначала включите VPN на Главном экране (любой сервер VLESS/Shadowsocks), затем вернитесь сюда! Либо нажмите «Импортировать конфиг» ниже.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    lineHeight = 15.sp,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -661,23 +728,25 @@ fun WarpSettingsDialog(
                 ) {
                     OutlinedButton(
                         onClick = {
-                            currentJob = scope.launch {
-                                isLoading = true
-                                statusMessage = "Регистрация нового аккаунта..."
-                                errorMessage = null
-                                val res = WarpManager.register(licenseKey.ifBlank { null })
-                                if (res.isSuccess) {
-                                    val cfg = res.getOrNull()
-                                    currentWarpConfig = cfg
-                                    if (licenseKey.isNotBlank() && cfg?.accountType != "warp_plus") {
-                                        statusMessage = "Аккаунт создан (бесплатный). Ключ не привязался (подробнее см. в Логах)."
+                            executeWithVpnCheck {
+                                currentJob = scope.launch {
+                                    isLoading = true
+                                    statusMessage = "Регистрация нового аккаунта..."
+                                    errorMessage = null
+                                    val res = WarpManager.register(licenseKey.ifBlank { null })
+                                    if (res.isSuccess) {
+                                        val cfg = res.getOrNull()
+                                        currentWarpConfig = cfg
+                                        if (licenseKey.isNotBlank() && cfg?.accountType != "warp_plus") {
+                                            statusMessage = "Аккаунт создан (бесплатный). Ключ не привязался (подробнее см. в Логах)."
+                                        } else {
+                                            statusMessage = "Аккаунт успешно создан!"
+                                        }
                                     } else {
-                                        statusMessage = "Аккаунт успешно создан!"
+                                        errorMessage = res.exceptionOrNull()?.message ?: "Ошибка регистрации"
                                     }
-                                } else {
-                                    errorMessage = res.exceptionOrNull()?.message ?: "Ошибка регистрации"
+                                    isLoading = false
                                 }
-                                isLoading = false
                             }
                         },
                         enabled = !isLoading,
@@ -700,21 +769,23 @@ fun WarpSettingsDialog(
                         OutlinedButton(
                             onClick = {
                                 val cfg = currentWarpConfig ?: return@OutlinedButton
-                                currentJob = scope.launch {
-                                    isLoading = true
-                                    statusMessage = "Привязка ключа WARP+..."
-                                    errorMessage = null
-                                    val res = WarpManager.bindLicense(cfg.accountId, cfg.accessToken, licenseKey.trim())
-                                    if (res.isSuccess) {
-                                        currentWarpConfig = cfg.copy(
-                                            accountType = res.getOrNull() ?: "warp_plus",
-                                            licenseKey = licenseKey.trim()
-                                        )
-                                        statusMessage = "Ключ WARP+ успешно активирован!"
-                                    } else {
-                                        errorMessage = res.exceptionOrNull()?.message ?: "Ошибка активации ключа"
+                                executeWithVpnCheck {
+                                    currentJob = scope.launch {
+                                        isLoading = true
+                                        statusMessage = "Привязка ключа WARP+..."
+                                        errorMessage = null
+                                        val res = WarpManager.bindLicense(cfg.accountId, cfg.accessToken, licenseKey.trim())
+                                        if (res.isSuccess) {
+                                            currentWarpConfig = cfg.copy(
+                                                accountType = res.getOrNull() ?: "warp_plus",
+                                                licenseKey = licenseKey.trim()
+                                            )
+                                            statusMessage = "Ключ WARP+ успешно активирован!"
+                                        } else {
+                                            errorMessage = res.exceptionOrNull()?.message ?: "Ошибка активации ключа"
+                                        }
+                                        isLoading = false
                                     }
-                                    isLoading = false
                                 }
                             },
                             enabled = !isLoading,
@@ -869,6 +940,60 @@ fun WarpSettingsDialog(
             dismissButton = {
                 TextButton(onClick = { showImportDialog = false }) {
                     Text("Отмена")
+                }
+            }
+        )
+    }
+
+    // Всплывающий диалог-предупреждение при отключенном VPN для пользователей из РФ
+    if (showVpnWarningDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showVpnWarningDialog = false
+                pendingAction = null
+            },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("VPN не подключен", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Text(
+                    text = "В России серверы Cloudflare API (api.cloudflareclient.com) заблокированы ТСПУ провайдеров.\n\n" +
+                            "Прямой запрос без VPN гарантированно вызовет ошибку таймаута (Read timed out).\n\n" +
+                            "👉 Рекомендуется нажать «Понятно», подключить любой рабочий VPN-сервер на Главном экране, а затем вернуться сюда и нажать кнопку снова — запрос пойдет через защищенный туннель!\n\n" +
+                            "Попробовать выполнить запрос напрямую?",
+                    style = MaterialTheme.typography.bodySmall,
+                    lineHeight = 16.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showVpnWarningDialog = false
+                        pendingAction?.invoke()
+                        pendingAction = null
+                    },
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Попробовать напрямую")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showVpnWarningDialog = false
+                        pendingAction = null
+                    }
+                ) {
+                    Text("Понятно, включу VPN")
                 }
             }
         )

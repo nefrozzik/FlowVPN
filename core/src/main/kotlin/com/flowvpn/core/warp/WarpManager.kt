@@ -59,15 +59,18 @@ object WarpManager {
     }
 
     private fun openConnection(urlString: String): HttpURLConnection {
-        val proxy = if (isLocalProxyActive()) {
+        val proxyActive = isLocalProxyActive()
+        val proxy = if (proxyActive) {
             java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress("127.0.0.1", LOCAL_PROXY_PORT))
         } else {
             java.net.Proxy.NO_PROXY
         }
 
         return (URL(urlString).openConnection(proxy) as HttpURLConnection).apply {
-            connectTimeout = 8000
-            readTimeout = 8000
+            // Через VPN даем нормальный таймаут 10с. Напрямую (VPN выключен) - короткий 4.5с,
+            // чтобы пользователь в РФ не ждал 16 секунд бессмысленного таймаута ТСПУ.
+            connectTimeout = if (proxyActive) 10000 else 4500
+            readTimeout = if (proxyActive) 10000 else 4500
             setRequestProperty("Content-Type", "application/json; charset=UTF-8")
             setRequestProperty("User-Agent", "okhttp/3.12.1")
             setRequestProperty("CF-Client-Version", "a-6.35-4471")
@@ -110,10 +113,11 @@ object WarpManager {
     suspend fun register(licenseKey: String? = null): Result<WarpConfig> = withContext(Dispatchers.IO) {
         val cleanKey = licenseKey?.trim()?.takeIf { it.isNotBlank() }
         val maskedKey = cleanKey?.let { if (it.length > 8) "${it.take(4)}...${it.takeLast(4)}" else it }
+        val proxyActive = isLocalProxyActive()
         CoreLogManager.log("=== Регистрация нового аккаунта Cloudflare WARP ${if (maskedKey != null) "(с ключом $maskedKey)" else "(бесплатный)"} ===", tag = "WARP")
 
         try {
-            withTimeout(15000L) {
+            withTimeout(if (proxyActive) 20000L else 6000L) {
                 val keyPair = X25519.generateKeyPair()
                 val privKey = keyPair.first
                 val pubKey = keyPair.second
@@ -250,7 +254,11 @@ object WarpManager {
                     msg.contains("reset", ignoreCase = true)
 
             val friendlyError = if (isNetworkBlockOrTimeout) {
-                "Не удалось связаться с серверами Cloudflare (таймаут/блокировка). В РФ Cloudflare API заблокирован ТСПУ. Пожалуйста, подключитесь к любому VPN-серверу (VLESS, Hysteria) на главном экране и повторите попытку."
+                if (!proxyActive) {
+                    "Cloudflare API недоступен (таймаут/блокировка ТСПУ). VPN отключен!\n👉 Включите VPN на Главном экране (например, подключитесь к Латвии) и повторите попытку — запрос пойдет через защищенный туннель без блокировок."
+                } else {
+                    "Не удалось связаться с серверами Cloudflare (таймаут через VPN). Проверьте интернет-соединение или смените сервер VPN."
+                }
             } else {
                 e.message ?: "Ошибка подключения к Cloudflare"
             }
@@ -268,10 +276,11 @@ object WarpManager {
     ): Result<String> = withContext(Dispatchers.IO) {
         val cleanKey = licenseKey.trim()
         val maskedKey = if (cleanKey.length > 8) "${cleanKey.take(4)}...${cleanKey.takeLast(4)}" else cleanKey
+        val proxyActive = isLocalProxyActive()
         CoreLogManager.log("=== Привязка лицензионного ключа WARP+ '$maskedKey' к аккаунту $accountId ===", tag = "WARP")
 
         try {
-            withTimeout(15000L) {
+            withTimeout(if (proxyActive) 20000L else 6000L) {
                 val url = "$API_ENDPOINT/$accountId/account"
                 CoreLogManager.log("Отправка PUT $url...", tag = "WARP")
 
@@ -333,7 +342,11 @@ object WarpManager {
                     msg.contains("reset", ignoreCase = true)
 
             val friendlyError = if (isNetworkBlockOrTimeout) {
-                "Не удалось связаться с серверами Cloudflare (таймаут/блокировка). Пожалуйста, подключитесь к любому VPN-серверу (VLESS, Hysteria) на главном экране и повторите попытку."
+                if (!proxyActive) {
+                    "Cloudflare API недоступен (таймаут/блокировка ТСПУ). VPN отключен!\n👉 Включите VPN на Главном экране (например, подключитесь к Латвии) и повторите попытку — запрос пойдет через защищенный туннель без блокировок."
+                } else {
+                    "Не удалось связаться с серверами Cloudflare (таймаут через VPN). Проверьте интернет-соединение или смените сервер VPN."
+                }
             } else {
                 e.message ?: "Ошибка подключения к Cloudflare"
             }
