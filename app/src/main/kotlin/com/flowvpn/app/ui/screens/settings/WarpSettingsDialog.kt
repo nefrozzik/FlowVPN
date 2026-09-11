@@ -181,9 +181,14 @@ fun WarpSettingsDialog(
                                         errorMessage = null
                                         val result = WarpManager.register(licenseKey.ifBlank { null })
                                         if (result.isSuccess) {
-                                            currentWarpConfig = result.getOrNull()
+                                            val cfg = result.getOrNull()
+                                            currentWarpConfig = cfg
                                             enableChaining = true
-                                            statusMessage = "Аккаунт WARP успешно создан!"
+                                            if (licenseKey.isNotBlank() && cfg?.accountType != "warp_plus") {
+                                                statusMessage = "Аккаунт WARP создан (бесплатный). Ключ не привязался (см. Логи)."
+                                            } else {
+                                                statusMessage = "Аккаунт WARP успешно создан!"
+                                            }
                                         } else {
                                             errorMessage = result.exceptionOrNull()?.message ?: "Ошибка регистрации"
                                         }
@@ -662,8 +667,13 @@ fun WarpSettingsDialog(
                                 errorMessage = null
                                 val res = WarpManager.register(licenseKey.ifBlank { null })
                                 if (res.isSuccess) {
-                                    currentWarpConfig = res.getOrNull()
-                                    statusMessage = "Аккаунт успешно создан!"
+                                    val cfg = res.getOrNull()
+                                    currentWarpConfig = cfg
+                                    if (licenseKey.isNotBlank() && cfg?.accountType != "warp_plus") {
+                                        statusMessage = "Аккаунт создан (бесплатный). Ключ не привязался (подробнее см. в Логах)."
+                                    } else {
+                                        statusMessage = "Аккаунт успешно создан!"
+                                    }
                                 } else {
                                     errorMessage = res.exceptionOrNull()?.message ?: "Ошибка регистрации"
                                 }

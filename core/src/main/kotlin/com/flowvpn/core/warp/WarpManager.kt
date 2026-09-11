@@ -1,5 +1,7 @@
 package com.flowvpn.core.warp
 
+import com.flowvpn.core.logger.CoreLogManager
+import com.flowvpn.core.logger.LogLevel
 import com.flowvpn.core.model.ProxyProtocol
 import com.flowvpn.core.model.ProxyServerConfig
 import com.flowvpn.core.model.WarpConfig
@@ -41,7 +43,7 @@ object WarpManager {
     private const val LOCAL_PROXY_PORT = 2080
 
     private fun isLocalProxyActive(): Boolean {
-        return try {
+        val active = try {
             val socket = java.net.Socket()
             socket.connect(java.net.InetSocketAddress("127.0.0.1", LOCAL_PROXY_PORT), 300)
             socket.close()
@@ -49,6 +51,11 @@ object WarpManager {
         } catch (_: Exception) {
             false
         }
+        CoreLogManager.log(
+            "Проверка локального прокси sing-box (127.0.0.1:$LOCAL_PROXY_PORT): ${if (active) "АКТИВЕН (запрос пойдет через защищенный VPN-туннель)" else "НЕ АКТИВЕН (прямой запрос)"}",
+            tag = "WARP"
+        )
+        return active
     }
 
     private fun openConnection(urlString: String): HttpURLConnection {
@@ -67,6 +74,33 @@ object WarpManager {
         }
     }
 
+    private fun parseCloudflareError(rawError: String): String {
+        return try {
+            val json = JSONObject(rawError)
+            val errorsArray = json.optJSONArray("errors")
+            if (errorsArray != null && errorsArray.length() > 0) {
+                val firstErr = errorsArray.getJSONObject(0)
+                val code = firstErr.optInt("code", 0)
+                val msg = firstErr.optString("message", "")
+                val codeStr = if (code != 0) " (код $code)" else ""
+                when {
+                    msg.contains("device limit", ignoreCase = true) || code == 10014 ->
+                        "Достигнут лимит устройств для ключа$codeStr (максимум 5 устройств на один ключ WARP+). Удалите старые устройства или используйте другой ключ."
+                    msg.contains("invalid", ignoreCase = true) || code == 10015 ->
+                        "Неверный ключ лицензии WARP+$codeStr. Проверьте правильность введенного ключа."
+                    msg.isNotBlank() ->
+                        "$msg$codeStr"
+                    else -> rawError
+                }
+            } else {
+                val msg = json.optString("message", "")
+                if (msg.isNotBlank()) msg else rawError
+            }
+        } catch (_: Exception) {
+            rawError
+        }
+    }
+
     /**
      * Зарегистрировать новый аккаунт Cloudflare WARP.
      *
@@ -74,11 +108,16 @@ object WarpManager {
      * @return [WarpConfig] с ключами и адресами WireGuard
      */
     suspend fun register(licenseKey: String? = null): Result<WarpConfig> = withContext(Dispatchers.IO) {
+        val cleanKey = licenseKey?.trim()?.takeIf { it.isNotBlank() }
+        val maskedKey = cleanKey?.let { if (it.length > 8) "${it.take(4)}...${it.takeLast(4)}" else it }
+        CoreLogManager.log("=== Регистрация нового аккаунта Cloudflare WARP ${if (maskedKey != null) "(с ключом $maskedKey)" else "(бесплатный)"} ===", tag = "WARP")
+
         try {
             withTimeout(15000L) {
                 val keyPair = X25519.generateKeyPair()
                 val privKey = keyPair.first
                 val pubKey = keyPair.second
+                CoreLogManager.log("Сгенерирована пара ключей X25519 (публичный: $pubKey)", tag = "WARP")
 
                 val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
                     timeZone = TimeZone.getTimeZone("UTC")
@@ -95,6 +134,7 @@ object WarpManager {
                     put("locale", "en_US")
                 }
 
+                CoreLogManager.log("Отправка запроса POST $API_ENDPOINT...", tag = "WARP")
                 val conn = openConnection(API_ENDPOINT).apply {
                     requestMethod = "POST"
                     doOutput = true
@@ -106,9 +146,13 @@ object WarpManager {
                 }
 
                 val statusCode = conn.responseCode
+                CoreLogManager.log("Ответ Cloudflare API на регистрацию: HTTP $statusCode", tag = "WARP")
+
                 if (statusCode !in 200..299) {
-                    val errorMsg = conn.errorStream?.bufferedReader()?.readText() ?: "HTTP $statusCode"
-                    return@withTimeout Result.failure(Exception("Cloudflare API error ($statusCode): $errorMsg"))
+                    val rawError = conn.errorStream?.bufferedReader()?.readText() ?: "HTTP $statusCode"
+                    CoreLogManager.log("Ошибка Cloudflare API: $rawError", LogLevel.ERROR, tag = "WARP")
+                    val parsed = parseCloudflareError(rawError)
+                    return@withTimeout Result.failure(Exception("Cloudflare API ($statusCode): $parsed"))
                 }
 
                 val responseJson = BufferedReader(InputStreamReader(conn.inputStream, "UTF-8")).use {
@@ -153,6 +197,8 @@ object WarpManager {
                     listOf(0, 0, 0)
                 }
 
+                CoreLogManager.log("Аккаунт WARP успешно создан! ID: $accountId, IPv4: $ipv4, IPv6: $ipv6, Reserved: $reservedBytes", tag = "WARP")
+
                 var finalConfig = WarpConfig(
                     accountId = accountId,
                     accessToken = token,
@@ -165,16 +211,25 @@ object WarpManager {
                     localAddressV6 = if (ipv6.contains("/")) ipv6 else "$ipv6/128",
                     reserved = reservedBytes,
                     mtu = 1280,
-                    licenseKey = licenseKey ?: "",
+                    licenseKey = cleanKey ?: "",
                 )
 
                 // Если предоставлен лицензионный ключ, привязываем его к созданному аккаунту
-                if (!licenseKey.isNullOrBlank()) {
-                    val bindResult = bindLicense(accountId, token, licenseKey.trim())
+                if (cleanKey != null) {
+                    CoreLogManager.log("Привязка переданного лицензионного ключа к созданному аккаунту...", tag = "WARP")
+                    val bindResult = bindLicense(accountId, token, cleanKey)
                     if (bindResult.isSuccess) {
                         finalConfig = finalConfig.copy(
                             accountType = bindResult.getOrNull() ?: "warp_plus",
-                            licenseKey = licenseKey.trim()
+                            licenseKey = cleanKey
+                        )
+                        CoreLogManager.log("Ключ WARP+ успешно привязан! Статус аккаунта: ${finalConfig.accountType}", tag = "WARP")
+                    } else {
+                        val bindError = bindResult.exceptionOrNull()?.message ?: "Неизвестная ошибка привязки"
+                        CoreLogManager.log("Внимание: Аккаунт создан, но ключ не удалось привязать: $bindError", LogLevel.WARN, tag = "WARP")
+                        finalConfig = finalConfig.copy(
+                            accountType = "free",
+                            licenseKey = ""
                         )
                     }
                 }
@@ -182,6 +237,7 @@ object WarpManager {
                 Result.success(finalConfig)
             }
         } catch (e: Exception) {
+            CoreLogManager.log("Исключение при регистрации Cloudflare: ${e.javaClass.simpleName} - ${e.message}", LogLevel.ERROR, tag = "WARP")
             val msg = e.message ?: ""
             val isNetworkBlockOrTimeout = e is TimeoutCancellationException ||
                     e is java.net.SocketTimeoutException ||
@@ -210,11 +266,17 @@ object WarpManager {
         accessToken: String,
         licenseKey: String,
     ): Result<String> = withContext(Dispatchers.IO) {
+        val cleanKey = licenseKey.trim()
+        val maskedKey = if (cleanKey.length > 8) "${cleanKey.take(4)}...${cleanKey.takeLast(4)}" else cleanKey
+        CoreLogManager.log("=== Привязка лицензионного ключа WARP+ '$maskedKey' к аккаунту $accountId ===", tag = "WARP")
+
         try {
             withTimeout(15000L) {
                 val url = "$API_ENDPOINT/$accountId/account"
+                CoreLogManager.log("Отправка PUT $url...", tag = "WARP")
+
                 val payload = JSONObject().apply {
-                    put("license", licenseKey)
+                    put("license", cleanKey)
                 }
 
                 val conn = openConnection(url).apply {
@@ -229,19 +291,36 @@ object WarpManager {
                 }
 
                 val statusCode = conn.responseCode
+                CoreLogManager.log("Ответ Cloudflare API на привязку ключа: HTTP $statusCode", tag = "WARP")
+
                 if (statusCode !in 200..299) {
-                    val errorMsg = conn.errorStream?.bufferedReader()?.readText() ?: "HTTP $statusCode"
-                    return@withTimeout Result.failure(Exception("Ошибка привязки ключа ($statusCode): $errorMsg"))
+                    val rawError = conn.errorStream?.bufferedReader()?.readText() ?: "HTTP $statusCode"
+                    CoreLogManager.log("Ошибка Cloudflare API: $rawError", LogLevel.ERROR, tag = "WARP")
+                    val parsed = parseCloudflareError(rawError)
+                    return@withTimeout Result.failure(Exception("Cloudflare ($statusCode): $parsed"))
                 }
 
-                val responseJson = BufferedReader(InputStreamReader(conn.inputStream, "UTF-8")).use {
-                    JSONObject(it.readText())
-                }
+                val rawResponse = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                CoreLogManager.log("Ответ Cloudflare: $rawResponse", tag = "WARP")
+                val responseJson = JSONObject(rawResponse)
 
-                val type = responseJson.optString("account_type", "warp_plus")
+                val isWarpPlus = responseJson.optBoolean("warp_plus", false)
+                val type = if (isWarpPlus) "warp_plus" else responseJson.optString("account_type", "warp_plus")
+                val premiumData = responseJson.optLong("premium_data", 0L)
+                val quota = responseJson.optLong("quota", 0L)
+
+                val trafficInfo = when {
+                    premiumData > 0 -> "Трафик WARP+: ${premiumData / (1024L * 1024L * 1024L)} ГБ"
+                    quota > 0 -> "Квота: ${quota / (1024L * 1024L * 1024L)} ГБ"
+                    isWarpPlus -> "Трафик: Безлимитный WARP+"
+                    else -> "Тип: $type"
+                }
+                CoreLogManager.log("Лицензия WARP+ успешно активирована! ($trafficInfo)", tag = "WARP")
+
                 Result.success(type)
             }
         } catch (e: Exception) {
+            CoreLogManager.log("Исключение при привязке ключа: ${e.javaClass.simpleName} - ${e.message}", LogLevel.ERROR, tag = "WARP")
             val msg = e.message ?: ""
             val isNetworkBlockOrTimeout = e is TimeoutCancellationException ||
                     e is java.net.SocketTimeoutException ||

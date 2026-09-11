@@ -118,6 +118,15 @@ object SingBoxConfigBuilder {
             ],"""
         } else ""
 
+        val mixedInbound = """
+            {
+                "type": "mixed",
+                "tag": "mixed-in",
+                "listen": "127.0.0.1",
+                "listen_port": 2080
+            }
+        """.trimIndent()
+
         return """
         {
             "log": {
@@ -134,7 +143,8 @@ object SingBoxConfigBuilder {
             $dns,
             $endpointsBlock
             "inbounds": [
-                $inbound
+                $inbound,
+                $mixedInbound
             ],
             "outbounds": [
                 ${outbounds.joinToString(",\n                ")}

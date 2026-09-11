@@ -1,5 +1,7 @@
 package com.flowvpn.core.warp
 
+import com.flowvpn.core.logger.CoreLogManager
+import com.flowvpn.core.logger.LogLevel
 import com.flowvpn.core.model.WarpConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -92,6 +94,9 @@ object WarpScanner {
         timeoutMs: Int = 800,
         onProgress: ((checked: Int, total: Int, latestWorking: WarpScanResult?) -> Unit)? = null
     ): List<WarpScanResult> = withContext(Dispatchers.IO) {
+        CoreLogManager.log("=== Запуск сканера чистых Anycast-эндпоинтов Cloudflare WARP ===", tag = "WarpScanner")
+        CoreLogManager.log("К проверке: ${candidates.size} эндпоинтов, таймаут: ${timeoutMs} мс", tag = "WarpScanner")
+
         val privKeyBytes = try {
             val k = warpConfig?.privateKey?.takeIf { it.isNotBlank() }
             if (k != null) Base64.getDecoder().decode(k) else ByteArray(32).also { secureRandom.nextBytes(it) }
@@ -132,6 +137,11 @@ object WarpScanner {
                 checkedCount++
                 if (res != null) {
                     workingResults.add(res)
+                    CoreLogManager.log(
+                        "Найден рабочий эндпоинт: ${res.ip}:${res.port} | RTT: ${res.pingMs} мс | " +
+                                if (res.isWireguardConfirmed) "WireGuard подтвержден" else "Anycast PoP доступен",
+                        tag = "WarpScanner"
+                    )
                     onProgress?.invoke(checkedCount, total, res)
                 } else {
                     onProgress?.invoke(checkedCount, total, null)
@@ -144,6 +154,19 @@ object WarpScanner {
                 .thenBy { it.pingMs }
         )
         Timber.i("WarpScanner: Найдено ${workingResults.size} доступных эндпоинтов из $total")
+        if (workingResults.isNotEmpty()) {
+            val best = workingResults.first()
+            CoreLogManager.log(
+                "Сканирование завершено: доступно ${workingResults.size} из $total эндпоинтов. Лучший: ${best.ip}:${best.port} (${best.pingMs} мс)",
+                tag = "WarpScanner"
+            )
+        } else {
+            CoreLogManager.log(
+                "Сканирование завершено: 0 из $total эндпоинтов ответили. В вашей сети/регионе Cloudflare блокируется провайдером.",
+                LogLevel.WARN,
+                tag = "WarpScanner"
+            )
+        }
         workingResults
     }
 
