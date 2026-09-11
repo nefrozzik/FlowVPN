@@ -481,9 +481,6 @@ object SingBoxConfigBuilder {
         parts += """"tag": "$tag""""
         parts += """"address": [$addrList]"""
         parts += """"private_key": "$privateKey""""
-        if (effectiveReserved.isNotEmpty() && effectiveReserved != listOf(0, 0, 0)) {
-            parts += """"reserved": [${effectiveReserved.joinToString(",")}]"""
-        }
         parts += """"peers": [{$peersBlock}]"""
         parts += """"mtu": $effectiveMtu"""
         detour?.let { parts += """"detour": "$it"""" }
