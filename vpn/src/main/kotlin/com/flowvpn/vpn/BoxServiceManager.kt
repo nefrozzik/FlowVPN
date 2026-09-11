@@ -3,12 +3,12 @@ package com.flowvpn.vpn
 import android.content.Context
 import com.flowvpn.core.logger.CoreLogManager
 import com.flowvpn.core.logger.LogLevel
-import com.hiddify.core.libbox.CommandServer
-import com.hiddify.core.libbox.CommandServerHandler
-import com.hiddify.core.libbox.Libbox
-import com.hiddify.core.libbox.OverrideOptions
-import com.hiddify.core.libbox.SetupOptions
-import com.hiddify.core.libbox.SystemProxyStatus
+import io.nekohasekai.libbox.CommandServer
+import io.nekohasekai.libbox.CommandServerHandler
+import io.nekohasekai.libbox.Libbox
+import io.nekohasekai.libbox.OverrideOptions
+import io.nekohasekai.libbox.SetupOptions
+import io.nekohasekai.libbox.SystemProxyStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -36,11 +36,51 @@ class BoxServiceManager(
         private var isInitialized = false
 
         /**
+         * Удаление поврежденных файлов кэша sing-box (bbolt DB).
+         * sing-box использует bbolt для cache.db и clash.db. При внезапном завершении процесса
+         * bbolt может повредить метаданные страниц, что приводит к критическому нативному падению
+         * (panic: invalid page type: 4: 10) при следующем запуске сервиса.
+         * Очистка этих файлов гарантирует стабильный и бессбойный старт.
+         */
+        fun cleanupCorruptedCacheDatabases(context: Context) {
+            try {
+                val rootDirs = listOfNotNull(
+                    context.filesDir,
+                    File(context.filesDir, "sing-box"),
+                    context.cacheDir,
+                    context.getExternalFilesDir(null),
+                    context.noBackupFilesDir
+                )
+                for (rootDir in rootDirs) {
+                    if (!rootDir.exists()) continue
+                    rootDir.walkTopDown().maxDepth(3).forEach { file ->
+                        if (file.isFile) {
+                            val name = file.name.lowercase()
+                            if (name.endsWith(".lock") || name.endsWith("-wal") ||
+                                name.endsWith("-shm") || name.endsWith("-journal") ||
+                                name.contains("clash.db")) {
+                                try {
+                                    val deleted = file.delete()
+                                    Timber.d("cleanupCorruptedCacheDatabases: deleted $deleted for ${file.absolutePath}")
+                                } catch (e: Throwable) {
+                                    Timber.w(e, "cleanupCorruptedCacheDatabases: failed to delete ${file.absolutePath}")
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                Timber.w(t, "cleanupCorruptedCacheDatabases: ошибка при очистке кэша")
+            }
+        }
+
+        /**
          * Ранняя инициализация контекста GoMobile в Application.onCreate.
          * Необходима для корректной работы JNI-моста gomobile.
          */
         @Synchronized
         fun initApp(context: Context) {
+            cleanupCorruptedCacheDatabases(context)
             try {
                 System.setProperty("GODEBUG", "stacktraceback=2")
                 System.setProperty("GOGC", "100")
@@ -53,6 +93,7 @@ class BoxServiceManager(
 
         @Synchronized
         fun initializeOnce(context: Context) {
+            cleanupCorruptedCacheDatabases(context)
             if (isInitialized) return
             try {
                 System.setProperty("GODEBUG", "stacktraceback=2")
@@ -66,26 +107,17 @@ class BoxServiceManager(
                 workingDir.mkdirs()
                 tempDir.mkdirs()
 
-                // Редирект stderr ДО вызова любых методов ядра
-                val stderrFile = File(workingDir, "singbox_stderr.log")
-                runCatching {
-                    Libbox.redirectStderr(stderrFile.absolutePath)
-                }
-
                 val setupOptions = SetupOptions().apply {
                     this.basePath = baseDir.absolutePath
                     this.workingPath = workingDir.absolutePath
                     this.tempPath = tempDir.absolutePath
                     this.fixAndroidStack = true
+                    this.oomKillerEnabled = true
                 }
                 runCatching {
                     Libbox.setup(setupOptions)
                 }.onFailure {
                     Timber.w(it, "Libbox.setup вернул ошибку (может быть штатно)")
-                }
-
-                runCatching {
-                    Libbox.setMemoryLimit(true)
                 }
 
                 isInitialized = true
@@ -104,6 +136,7 @@ class BoxServiceManager(
     private var currentConfigPath: String? = null
 
     fun start(configPath: String) {
+        cleanupCorruptedCacheDatabases(vpnService)
         initializeOnce(vpnService)
         DefaultNetworkMonitor.start(vpnService)
         currentConfigPath = configPath
@@ -115,6 +148,10 @@ class BoxServiceManager(
         val configContent = configFile.readText()
 
         val handler = object : CommandServerHandler {
+            override fun connectSSHAgent(): Int = -1
+
+            override fun triggerNativeCrash() {}
+
             override fun getSystemProxyStatus(): SystemProxyStatus = SystemProxyStatus()
 
             override fun serviceReload() {

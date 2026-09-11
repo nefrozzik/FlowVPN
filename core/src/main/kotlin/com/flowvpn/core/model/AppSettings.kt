@@ -69,14 +69,26 @@ data class AppSettings(
     val customBypassDomains: List<String> = emptyList(),
     val killSwitch: Boolean = false,
     val blockIpv6: Boolean = true,
-    val mtu: Int = 1500,
+    val mtu: Int = 1400,
     val fakeDns: Boolean = false,
     val sniffing: Boolean = true,
     val autoConnect: Boolean = false,
     val autoUpdateSubscriptions: Boolean = true,
     val autoUpdateIntervalHours: Int = 24,
     val fileLoggingEnabled: Boolean = false,
+    val enableWarpChaining: Boolean = false,
+    val warpLicenseKey: String = "",
+    val warpAccountType: String = "",
+    val warpConfigJson: String? = null,
+    val warpMode: WarpMode = WarpMode.MASQUE_H2,
 ) {
+    /**
+     * Получить разобранный конфиг WARP, если он сохранен.
+     */
+    fun getWarpConfig(): WarpConfig? {
+        return warpConfigJson?.let { WarpConfig.fromJson(it) }
+    }
+
     /**
      * Получить эффективный адрес DNS для передачи в конфигурацию sing-box.
      */

@@ -3,6 +3,7 @@ package com.flowvpn.app.data
 import android.content.Context
 import com.flowvpn.core.model.AppSettings
 import com.flowvpn.core.model.DnsProvider
+import com.flowvpn.core.model.WarpMode
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -101,6 +102,22 @@ class SettingsRepository(
         it.copy(fileLoggingEnabled = enabled)
     }
 
+    suspend fun setWarpSettings(
+        enabled: Boolean,
+        licenseKey: String,
+        accountType: String,
+        configJson: String?,
+        warpMode: WarpMode? = null,
+    ) = update {
+        it.copy(
+            enableWarpChaining = enabled,
+            warpLicenseKey = licenseKey,
+            warpAccountType = accountType,
+            warpConfigJson = configJson.takeIf { s -> !s.isNullOrBlank() },
+            warpMode = warpMode ?: it.warpMode
+        )
+    }
+
     suspend fun resetToDefaults() = update {
         AppSettings()
     }
@@ -160,6 +177,11 @@ class SettingsRepository(
                 autoUpdateSubscriptions = json.optBoolean("autoUpdateSubscriptions", true),
                 autoUpdateIntervalHours = json.optInt("autoUpdateIntervalHours", 24),
                 fileLoggingEnabled = json.optBoolean("fileLoggingEnabled", false),
+                enableWarpChaining = json.optBoolean("enableWarpChaining", false),
+                warpLicenseKey = json.optString("warpLicenseKey", ""),
+                warpAccountType = json.optString("warpAccountType", ""),
+                warpConfigJson = json.optString("warpConfigJson").takeIf { it.isNotBlank() },
+                warpMode = WarpMode.fromWireName(json.optString("warpMode", "masque_h2")),
             )
             com.flowvpn.core.logger.AppLogManager.isFileLoggingEnabled = loaded.fileLoggingEnabled
             loaded
@@ -186,6 +208,11 @@ class SettingsRepository(
                 put("autoUpdateSubscriptions", settings.autoUpdateSubscriptions)
                 put("autoUpdateIntervalHours", settings.autoUpdateIntervalHours)
                 put("fileLoggingEnabled", settings.fileLoggingEnabled)
+                put("enableWarpChaining", settings.enableWarpChaining)
+                put("warpLicenseKey", settings.warpLicenseKey)
+                put("warpAccountType", settings.warpAccountType)
+                put("warpMode", settings.warpMode.wireName)
+                putOpt("warpConfigJson", settings.warpConfigJson)
             }
             val jsonString = json.toString(2)
             settingsFile.writeText(jsonString)

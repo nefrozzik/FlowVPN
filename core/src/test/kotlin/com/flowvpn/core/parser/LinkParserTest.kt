@@ -5,6 +5,7 @@ import com.flowvpn.core.model.ProxyProtocol
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Base64
@@ -270,5 +271,120 @@ class LinkParserTest {
         assertEquals("127.0.0.1", server?.address)
         assertEquals(10808, server?.port)
         assertEquals("secret", server?.password)
+    }
+
+    @Test
+    fun testParseOutlineStandardAccessKey() {
+        // Base64 of chacha20-ietf-poly1305:mypassword is Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpteXBhc3N3b3Jk
+        val link = "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpteXBhc3N3b3Jk@192.0.2.1:8388/?outline=1#Frankfurt%20Outline"
+        val server = LinkParser.parse(link)
+
+        assertNotNull(server)
+        assertEquals("Frankfurt Outline", server?.name)
+        assertEquals(ProxyProtocol.SHADOWSOCKS, server?.protocol)
+        assertEquals("192.0.2.1", server?.address)
+        assertEquals(8388, server?.port)
+        assertEquals("chacha20-ietf-poly1305", server?.method)
+        assertEquals("mypassword", server?.password)
+        assertTrue(server?.isOutline == true)
+    }
+
+    @Test
+    fun testParseOutlineAccessKeyWithPrefixAndScheme() {
+        val link = "outline://ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpteXBhc3N3b3Jk@192.0.2.2:8388/?outline=1&prefix=POST%20%2F%20HTTP%2F1.1%0D%0A#Prefix%20Outline"
+        val server = LinkParser.parse(link)
+
+        assertNotNull(server)
+        assertEquals("Prefix Outline", server?.name)
+        assertEquals(ProxyProtocol.SHADOWSOCKS, server?.protocol)
+        assertEquals("192.0.2.2", server?.address)
+        assertEquals(8388, server?.port)
+        assertEquals("POST / HTTP/1.1\r\n", server?.prefix)
+        assertTrue(server?.isOutline == true)
+    }
+
+    @Test
+    fun testParseOutlineDynamicSsconfKey() {
+        val link = "ssconf://outline.example.com/api/key#Dynamic%20Key"
+        // ssconf:// — динамическая подписка, не должна парситься как статичный сервер с пустым паролем
+        val server = LinkParser.parse(link)
+        assertNull(server)
+    }
+
+    @Test
+    fun testParseOutlineKeyWithUrlEncodedPaddingAndAliases() {
+        // userinfo с URL-encoded padding %3D%3D и методом chacha20-poly1305
+        val link = "ss://Y2hhY2hhMjAtcG9seTEzMDU6bXlwYXNz%3D%3D@198.51.100.1:8388/?outline=1#UrlEncodedKey"
+        val server = ShadowsocksParser.parse(link)
+
+        assertNotNull(server)
+        assertEquals("UrlEncodedKey", server?.name)
+        assertEquals(ProxyProtocol.SHADOWSOCKS, server?.protocol)
+        assertEquals("198.51.100.1", server?.address)
+        assertEquals(8388, server?.port)
+        assertEquals("chacha20-ietf-poly1305", server?.method)
+        assertEquals("mypass", server?.password)
+        assertTrue(server?.isOutline == true)
+    }
+
+    @Test
+    fun testParseOutlineJsonConfig() {
+        val json = """
+            {
+              "server": "192.0.2.4",
+              "server_port": 8388,
+              "password": "jsonpassword",
+              "method": "chacha20-ietf-poly1305",
+              "prefix": "POST /",
+              "name": "Outline JSON"
+            }
+        """.trimIndent()
+
+        val servers = SubscriptionDecoder.decode(json)
+        assertEquals(1, servers.size)
+        val server = servers[0]
+        assertEquals("Outline JSON", server.name)
+        assertEquals(ProxyProtocol.SHADOWSOCKS, server.protocol)
+        assertEquals("192.0.2.4", server.address)
+        assertEquals(8388, server.port)
+        assertEquals("jsonpassword", server.password)
+        assertEquals("POST /", server.prefix)
+        assertTrue(server.isOutline)
+    }
+
+    @Test
+    fun testExtractOutlineFromTelegramMessage() {
+        val telegramMessage = """
+            Привет! Держи ключ от Outline VPN:
+            ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpteXBhc3N3b3Jk@192.0.2.5:8388/?outline=1#Telegram%20Key
+            
+            Инструкция: скачай приложение и нажми на ключ.
+        """.trimIndent()
+
+        val servers = SubscriptionDecoder.decode(telegramMessage)
+        assertEquals(1, servers.size)
+        val server = servers[0]
+        assertEquals("Telegram Key", server.name)
+        assertEquals("192.0.2.5", server.address)
+        assertEquals(8388, server.port)
+        assertTrue(server.isOutline)
+    }
+
+    @Test
+    fun testPreservePlusInPasswordAndBase64() {
+        // Проверяем, что символ '+' в пароле не заменяется на пробел
+        val rawPassword = "pass+with+plus/123=="
+        val plainKey = "ss://chacha20-ietf-poly1305:$rawPassword@192.0.2.10:8388#PlusTest"
+        val server1 = LinkParser.parse(plainKey)
+        assertNotNull(server1)
+        assertEquals(rawPassword, server1?.password)
+
+        // Проверяем в Base64 ключе Outline (SIP002)
+        val userinfo = "chacha20-ietf-poly1305:$rawPassword"
+        val encodedUserinfo = java.util.Base64.getEncoder().encodeToString(userinfo.toByteArray())
+        val b64Key = "ss://$encodedUserinfo@192.0.2.10:8388/?outline=1#B64PlusTest"
+        val server2 = LinkParser.parse(b64Key)
+        assertNotNull(server2)
+        assertEquals(rawPassword, server2?.password)
     }
 }

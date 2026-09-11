@@ -36,6 +36,9 @@ dependencies {
     // Logging
     implementation(libs.timber)
 
+    // Cryptography for WireGuard handshake in WarpScanner (Blake2s, ChaCha20-Poly1305)
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+
     // Testing
     testImplementation(libs.junit)
     testImplementation(libs.mockk)

@@ -47,8 +47,8 @@ object Hysteria2Parser {
         val atIndex = withoutScheme.indexOf('@')
         if (atIndex < 0) return null
 
-        val password = java.net.URLDecoder.decode(
-            withoutScheme.substring(0, atIndex), "UTF-8"
+        val password = UriParseUtils.safePercentDecode(
+            withoutScheme.substring(0, atIndex)
         )
 
         val authorityEnd = withoutScheme.indexOfFirst { it == '?' || it == '#' }

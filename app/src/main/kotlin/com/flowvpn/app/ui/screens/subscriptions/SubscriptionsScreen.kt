@@ -106,10 +106,14 @@ fun SubscriptionsScreen(
 
     fun processScannedContent(content: String) {
         val trimmed = content.trim()
-        if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) {
+        if (trimmed.startsWith("http://", ignoreCase = true) ||
+            trimmed.startsWith("https://", ignoreCase = true) ||
+            trimmed.startsWith("ssconf://", ignoreCase = true) ||
+            trimmed.startsWith("outline://", ignoreCase = true)
+        ) {
             viewModel.addSubscription(trimmed)
             coroutineScope.launch {
-                snackbarHostState.showSnackbar("Добавление подписки по ссылке...")
+                snackbarHostState.showSnackbar("Добавление подписки / ключа...")
             }
         } else {
             viewModel.importFromText(trimmed) { count ->
@@ -332,7 +336,7 @@ fun SubscriptionsScreen(
                     OutlinedTextField(
                         value = url,
                         onValueChange = { url = it },
-                        label = { Text("URL подписки (http / https)") },
+                        label = { Text("URL подписки или ключ Outline (https, ssconf, ss)") },
                         singleLine = true,
                         leadingIcon = { Icon(Icons.Default.Link, contentDescription = null) },
                         trailingIcon = {
@@ -385,7 +389,7 @@ fun SubscriptionsScreen(
             text = {
                 Column {
                     Text(
-                        "Вставьте список ссылок (vless://, vmess://, ss://, hysteria2://) или Base64/Clash профиль:",
+                        "Вставьте список ссылок (vless, vmess, ss, hysteria2), ключ Outline (ss://, ssconf://) или JSON-профиль:",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

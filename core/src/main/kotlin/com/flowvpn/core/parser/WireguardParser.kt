@@ -47,8 +47,8 @@ object WireguardParser {
         val atIndex = withoutScheme.indexOf('@')
         if (atIndex < 0) return null
 
-        val privateKey = java.net.URLDecoder.decode(
-            withoutScheme.substring(0, atIndex), "UTF-8"
+        val privateKey = UriParseUtils.safePercentDecode(
+            withoutScheme.substring(0, atIndex)
         )
 
         val authorityEnd = withoutScheme.indexOfFirst { it == '?' || it == '#' }

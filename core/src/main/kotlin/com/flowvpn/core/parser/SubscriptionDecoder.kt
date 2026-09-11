@@ -62,11 +62,22 @@ object SubscriptionDecoder {
         if (trimmed.isBlank()) return emptyList()
 
         return when (detectFormat(trimmed)) {
-            Format.SINGBOX_JSON -> SingBoxProfileParser.parse(trimmed)
+            Format.OUTLINE_JSON -> {
+                val parsed = OutlineParser.parseJson(trimmed)
+                if (parsed.isNotEmpty()) parsed else SingBoxProfileParser.parse(trimmed)
+            }
+            Format.SINGBOX_JSON -> {
+                val parsed = SingBoxProfileParser.parse(trimmed)
+                if (parsed.isNotEmpty()) parsed else OutlineParser.parseJson(trimmed)
+            }
             Format.CLASH_YAML -> ClashProfileParser.parse(trimmed)
             Format.PLAIN_LINKS -> LinkParser.parseMultiple(trimmed)
             Format.BASE64_LINKS -> decodeBase64Links(trimmed)
             Format.UNKNOWN -> {
+                // Сначала пробуем извлечь ключи Outline из произвольного текста (сообщения Telegram и т.д.)
+                val outlineExtracted = OutlineParser.parseMultipleOrText(trimmed)
+                if (outlineExtracted.isNotEmpty()) return outlineExtracted
+
                 // Последняя попытка — вдруг это Base64
                 tryDecodeAsBase64(trimmed)
             }
@@ -81,10 +92,16 @@ object SubscriptionDecoder {
 
         // JSON: начинается с { или [
         if (firstChar == '{' || firstChar == '[') {
+            if (content.contains("\"accessKeys\"") ||
+                (content.contains("\"server\"") && (content.contains("\"server_port\"") || content.contains("\"password\""))) ||
+                content.contains("\"transport\"")
+            ) {
+                return Format.OUTLINE_JSON
+            }
             return if (content.contains("\"outbounds\"") || content.contains("\"inbounds\"")) {
                 Format.SINGBOX_JSON
             } else {
-                Format.SINGBOX_JSON // Пробуем как JSON в любом случае
+                Format.SINGBOX_JSON
             }
         }
 
@@ -131,9 +148,9 @@ object SubscriptionDecoder {
             val decoded = UriParseUtils.decodeBase64(cleaned)
             val results = LinkParser.parseMultiple(decoded)
             if (results.isNotEmpty()) results
-            else LinkParser.parseMultiple(content) // Fallback: пробуем как plaintext
+            else OutlineParser.parseMultipleOrText(content) // Fallback: пробуем как текст Outline
         } catch (_: Exception) {
-            LinkParser.parseMultiple(content)
+            OutlineParser.parseMultipleOrText(content)
         }
     }
 
@@ -152,6 +169,7 @@ object SubscriptionDecoder {
 
     private enum class Format {
         SINGBOX_JSON,
+        OUTLINE_JSON,
         CLASH_YAML,
         PLAIN_LINKS,
         BASE64_LINKS,

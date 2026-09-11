@@ -2,7 +2,10 @@ package com.flowvpn.core.subscription
 
 import com.flowvpn.core.model.ProxyServerConfig
 import com.flowvpn.core.model.SubscriptionInfo
+import com.flowvpn.core.parser.LinkParser
+import com.flowvpn.core.parser.OutlineParser
 import com.flowvpn.core.parser.SubscriptionDecoder
+import com.flowvpn.core.parser.UriParseUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import timber.log.Timber
@@ -68,9 +71,43 @@ class SubscriptionManager {
         url: String,
         existingInfo: SubscriptionInfo? = null,
     ): SubscriptionInfo = withContext(Dispatchers.IO) {
-        Timber.i("SubscriptionManager: Загрузка подписки: $url")
+        val trimmedUrl = url.trim()
+        Timber.i("SubscriptionManager: Обработка URL / ключа: $trimmedUrl")
 
-        val connection = createConnection(url)
+        // 1. Проверяем: вдруг это прямой ключ (ss://, outline://ss://, vless:// и т.д.)
+        val isSsconf = trimmedUrl.contains("ssconf://", ignoreCase = true)
+        val directServer = if (isSsconf) null else (OutlineParser.parseAccessKey(trimmedUrl) ?: LinkParser.parse(trimmedUrl))
+
+        if (directServer != null) {
+            Timber.i("SubscriptionManager: Распознан прямой ключ сервера: ${directServer.name}")
+            val displayName = existingInfo?.name ?: directServer.name.ifBlank { "Outline Server" }
+            return@withContext SubscriptionInfo(
+                id = existingInfo?.id ?: java.util.UUID.randomUUID().toString(),
+                name = displayName,
+                url = trimmedUrl,
+                lastUpdatedMs = System.currentTimeMillis(),
+                servers = listOf(directServer),
+            )
+        }
+
+        // 2. Обрабатываем динамический URL Outline (ssconf:// или outline://ssconf://)
+        val fragmentName = UriParseUtils.extractFragment(trimmedUrl)
+        val cleanUrl = when {
+            trimmedUrl.startsWith("outline://", ignoreCase = true) -> trimmedUrl.substring(10).trim()
+            trimmedUrl.startsWith("outline-vpn://", ignoreCase = true) -> trimmedUrl.substring(14).trim()
+            else -> trimmedUrl
+        }
+        val rawHttpUrl = cleanUrl.removePrefix("ssconf://").removePrefix("SSCONF://")
+        val httpUrl = when {
+            rawHttpUrl.startsWith("http://", ignoreCase = true) || rawHttpUrl.startsWith("https://", ignoreCase = true) ->
+                rawHttpUrl.substringBefore('#')
+            cleanUrl.startsWith("ssconf://", ignoreCase = true) ->
+                "https://" + rawHttpUrl.substringBefore('#')
+            else ->
+                cleanUrl.substringBefore('#')
+        }
+
+        val connection = createConnection(httpUrl)
         try {
             connection.connect()
 
@@ -101,7 +138,11 @@ class SubscriptionManager {
             }
 
             // Декодируем и парсим серверы
-            val servers = SubscriptionDecoder.decode(body)
+            var servers = SubscriptionDecoder.decode(body)
+            if (servers.isEmpty()) {
+                servers = OutlineParser.parseMultipleOrText(body)
+            }
+
             if (servers.isEmpty()) {
                 throw SubscriptionException(
                     "Не удалось распарсить серверы из подписки",
@@ -109,13 +150,25 @@ class SubscriptionManager {
                 )
             }
 
+            // Если был передан fragmentName, а у серверов имя дефолтное, улучшаем имя
+            if (fragmentName.isNotBlank()) {
+                servers = servers.mapIndexed { idx, s ->
+                    if (s.name.startsWith("Outline (") || s.name.isBlank()) {
+                        val suffix = if (servers.size > 1) " #${idx + 1}" else ""
+                        s.copy(name = "$fragmentName$suffix")
+                    } else {
+                        s
+                    }
+                }
+            }
+
             Timber.i("SubscriptionManager: Получено ${servers.size} серверов")
 
             // Формируем обновлённую SubscriptionInfo
             SubscriptionInfo(
                 id = existingInfo?.id ?: java.util.UUID.randomUUID().toString(),
-                name = profileName ?: existingInfo?.name ?: extractDomain(url),
-                url = url,
+                name = profileName ?: existingInfo?.name ?: fragmentName.ifBlank { extractDomain(httpUrl) },
+                url = trimmedUrl,
                 lastUpdatedMs = System.currentTimeMillis(),
                 servers = servers,
                 uploadBytes = userinfo?.upload,

@@ -51,11 +51,72 @@ object SingBoxConfigBuilder {
         settings: com.flowvpn.core.model.AppSettings,
         enabledApps: List<String>? = null,
         excludedApps: List<String>? = null,
+        outlineBridgePort: Int? = null,
+        underlyingProxy: ProxyServerConfig? = null,
     ): String {
-        val outbound = buildOutbound(config)
-        val dns = buildDns(config, settings)
+        val warpConfig = settings.getWarpConfig()
+        val isWarpServer = config.id.startsWith("warp-") ||
+                config.protocol == ProxyProtocol.MASQUE ||
+                (config.protocol == ProxyProtocol.WIREGUARD &&
+                        (config.name.contains("WARP", ignoreCase = true) || config.address.startsWith("162.159.") || config.address.startsWith("188.114.")))
+
+        val isChainedWarp = (settings.enableWarpChaining && warpConfig != null && !isWarpServer) ||
+                (isWarpServer && settings.enableWarpChaining && underlyingProxy != null)
+
+        val primaryConfig = if (isWarpServer && settings.enableWarpChaining && underlyingProxy != null) underlyingProxy else config
+
+        val endpoints = mutableListOf<String>()
+        val outbounds = mutableListOf<String>()
+
+        if (primaryConfig.protocol == ProxyProtocol.WIREGUARD) {
+            endpoints += buildWireguardEndpoint(primaryConfig, tag = "proxy", detour = null, settings = settings)
+        } else {
+            outbounds += buildOutbound(primaryConfig, outlineBridgePort, settings)
+        }
+
+        if (isChainedWarp) {
+            val effectiveWarp = if (isWarpServer) {
+                warpConfig?.copy(
+                    endpointHost = if (config.address.isNotBlank() && config.address != "0.0.0.0") config.address else warpConfig.endpointHost,
+                    endpointPort = if (config.port > 0) config.port else warpConfig.endpointPort,
+                    warpMode = settings.warpMode
+                ) ?: com.flowvpn.core.model.WarpConfig(
+                    accountId = config.id.removePrefix("warp-"),
+                    accessToken = "",
+                    accountType = if (config.name.contains("+")) "warp_plus" else "free",
+                    privateKey = config.privateKey ?: "",
+                    peerPublicKey = config.peerPublicKey ?: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                    endpointHost = config.address,
+                    endpointPort = config.port,
+                    localAddressV4 = config.localAddresses?.firstOrNull { !it.contains(":") } ?: "172.16.0.2/32",
+                    localAddressV6 = config.localAddresses?.firstOrNull { it.contains(":") } ?: "2606:4700:110:8::1/128",
+                    reserved = config.reserved ?: listOf(0, 0, 0),
+                    mtu = config.wireguardMtu ?: 1280,
+                    licenseKey = settings.warpLicenseKey,
+                    warpMode = settings.warpMode
+                )
+            } else {
+                warpConfig!!.copy(warpMode = settings.warpMode)
+            }
+            if (effectiveWarp.warpMode == com.flowvpn.core.model.WarpMode.WIREGUARD) {
+                val wgConfig = com.flowvpn.core.warp.WarpManager.toProxyServerConfig(effectiveWarp)
+                endpoints += buildWireguardEndpoint(wgConfig, tag = "warp", detour = "proxy", settings = settings)
+            } else {
+                outbounds += buildWarpOutbound(effectiveWarp)
+            }
+        }
+
+        val dns = buildDns(primaryConfig, settings, isChainedWarp)
         val inbound = buildTunInbound(settings, enabledApps, excludedApps)
-        val route = buildRoute(config, settings)
+        val route = buildRoute(primaryConfig, settings, isChainedWarp, outlineBridgePort)
+
+        outbounds += """{"type": "direct", "tag": "direct"}"""
+
+        val endpointsBlock = if (endpoints.isNotEmpty()) {
+            """"endpoints": [
+                ${endpoints.joinToString(",\n                ")}
+            ],"""
+        } else ""
 
         return """
         {
@@ -63,13 +124,20 @@ object SingBoxConfigBuilder {
                 "level": "debug",
                 "timestamp": true
             },
+            "experimental": {
+                "cache_file": {
+                    "enabled": true,
+                    "path": "cache.db",
+                    "store_masque_config": true
+                }
+            },
             $dns,
-            "inbounds": [$inbound],
+            $endpointsBlock
+            "inbounds": [
+                $inbound
+            ],
             "outbounds": [
-                $outbound,
-                {"type": "direct", "tag": "direct"},
-                {"type": "block", "tag": "block"},
-                {"type": "dns", "tag": "dns-out"}
+                ${outbounds.joinToString(",\n                ")}
             ],
             $route
         }
@@ -107,14 +175,37 @@ object SingBoxConfigBuilder {
      * - Hysteria2: server, server_port, password, up_mbps, down_mbps, obfs, tls
      * - WireGuard: server, server_port, private_key, peer_public_key, local_address
      */
-    private fun buildOutbound(config: ProxyServerConfig): String {
-        val base = """
-            "type": "${config.protocol.singBoxType}",
-            "tag": "proxy",
-            "server": "${config.address}",
-            "server_port": ${config.port},
-            "domain_resolver": "direct-dns"
-        """.trimIndent()
+    private fun buildOutbound(
+        config: ProxyServerConfig,
+        outlineBridgePort: Int? = null,
+        settings: com.flowvpn.core.model.AppSettings? = null,
+    ): String {
+        if (outlineBridgePort != null) {
+            return """
+            {
+                "type": "socks",
+                "tag": "proxy",
+                "server": "127.0.0.1",
+                "server_port": $outlineBridgePort,
+                "version": "5",
+                "network": "tcp"
+            }
+            """.trimIndent()
+        }
+
+        if (config.protocol == ProxyProtocol.MASQUE) {
+            return buildMasqueProxyOutbound(config, settings)
+        }
+
+        val baseParts = mutableListOf<String>()
+        baseParts += """"type": "${config.protocol.singBoxType}""""
+        baseParts += """"tag": "proxy""""
+        baseParts += """"server": "${config.address}""""
+        baseParts += """"server_port": ${config.port}"""
+        if (config.protocol != ProxyProtocol.WIREGUARD) {
+            baseParts += """"domain_resolver": "direct-dns""""
+        }
+        val base = baseParts.joinToString(",\n")
 
         val protocolFields = when (config.protocol) {
             ProxyProtocol.VLESS -> buildVlessFields(config)
@@ -123,13 +214,66 @@ object SingBoxConfigBuilder {
             ProxyProtocol.TROJAN -> buildTrojanFields(config)
             ProxyProtocol.HYSTERIA2 -> buildHysteria2Fields(config)
             ProxyProtocol.TUIC -> buildTuicFields(config)
-            ProxyProtocol.WIREGUARD -> buildWireguardFields(config)
+            ProxyProtocol.WIREGUARD -> buildWireguardFields(config, settings)
             ProxyProtocol.SOCKS5 -> buildSocksFields(config)
             ProxyProtocol.HTTP -> buildHttpFields(config)
             ProxyProtocol.OPENFLUX -> buildSocksFields(config)
+            ProxyProtocol.MASQUE -> ""
         }
 
         return "{$base,$protocolFields}"
+    }
+
+    /**
+     * Сгенерировать JSON-блок outbound для протокола MASQUE (RFC 9484 CONNECT-IP).
+     * В shtorm-7/sing-box-extended используется type: "masque".
+     * Поддерживает HTTP/2 TCP (с TLS-фрагментацией) или HTTP/3 QUIC (UDP 443).
+     */
+    private fun buildMasqueProxyOutbound(
+        config: ProxyServerConfig,
+        settings: com.flowvpn.core.model.AppSettings?,
+    ): String {
+        val warpConfig = settings?.getWarpConfig()
+        val effectiveWarpMode = warpConfig?.warpMode ?: settings?.warpMode ?: com.flowvpn.core.model.WarpMode.MASQUE_H2
+        val useHttp2 = effectiveWarpMode == com.flowvpn.core.model.WarpMode.MASQUE_H2
+        val licenseKey = settings?.warpLicenseKey?.takeIf { it.isNotBlank() } ?: warpConfig?.licenseKey ?: ""
+
+        val parts = mutableListOf<String>()
+        parts += """"type": "masque""""
+        parts += """"tag": "proxy""""
+        parts += """"use_http2": $useHttp2"""
+        val effectiveAddress = if (config.address.isBlank() || config.address == "0.0.0.0") {
+            if (useHttp2) "162.159.198.2" else "162.159.192.1"
+        } else config.address
+        if (effectiveAddress.isNotBlank() && effectiveAddress != "0.0.0.0") {
+            parts += """"address": "$effectiveAddress""""
+            parts += """"port": ${if (config.port > 0) config.port else 443}"""
+        }
+        val profileParts = mutableListOf<String>()
+        warpConfig?.let { warp ->
+            if (warp.accessToken.isNotBlank()) {
+                profileParts += """"auth_token": "${escapeJson(warp.accessToken)}""""
+            }
+            if (warp.accountId.isNotBlank()) {
+                profileParts += """"id": "${escapeJson(warp.accountId)}""""
+            }
+        }
+        if (licenseKey.isNotBlank()) {
+            profileParts += """"license_key": "${escapeJson(licenseKey)}""""
+        }
+        if (profileParts.isNotEmpty()) {
+            parts += """"profile": {${profileParts.joinToString(",")}}"""
+        }
+        parts += """
+            "tls": {
+                "server_name": "consumer-masque.cloudflareclient.com",
+                "insecure": true,
+                "fragment": true,
+                "record_fragment": true
+            }
+        """.trimIndent()
+
+        return "{\n" + parts.joinToString(",\n") + "\n}"
     }
 
     private fun buildSocksFields(config: ProxyServerConfig): String {
@@ -150,6 +294,7 @@ object SingBoxConfigBuilder {
         parts += """"uuid": "${config.uuid}""""
 
         config.flow?.let { parts += """"flow": "$it"""" }
+        parts += """"packet_encoding": "xudp""""
 
         config.tls?.let { parts += buildTlsBlock(it) }
         config.transport?.let {
@@ -165,6 +310,7 @@ object SingBoxConfigBuilder {
         parts += """"uuid": "${config.uuid}""""
         parts += """"alter_id": ${config.alterId}"""
         parts += """"security": "${config.method ?: "auto"}""""
+        parts += """"packet_encoding": "xudp""""
 
         config.tls?.let { parts += buildTlsBlock(it) }
         config.transport?.let {
@@ -176,15 +322,26 @@ object SingBoxConfigBuilder {
     }
 
     private fun buildShadowsocksFields(config: ProxyServerConfig): String {
-        return """
-            "method": "${config.method}",
-            "password": "${config.password}"
-        """.trimIndent()
+        val parts = mutableListOf<String>()
+        val rawMethod = config.method?.trim()?.lowercase() ?: "chacha20-ietf-poly1305"
+        val method = when (rawMethod) {
+            "chacha20-poly1305", "aead_chacha20_poly1305" -> "chacha20-ietf-poly1305"
+            "aead_aes_256_gcm" -> "aes-256-gcm"
+            "aead_aes_128_gcm" -> "aes-128-gcm"
+            "aead_aes_192_gcm" -> "aes-192-gcm"
+            else -> rawMethod
+        }
+        parts += """"method": "$method""""
+        parts += """"password": "${escapeJson(config.password ?: "")}""""
+        config.plugin?.let { parts += """"plugin": "${escapeJson(it)}"""" }
+        config.pluginOpts?.let { parts += """"plugin_opts": "${escapeJson(it)}"""" }
+        return parts.joinToString(",\n")
     }
 
     private fun buildTrojanFields(config: ProxyServerConfig): String {
         val parts = mutableListOf<String>()
         parts += """"password": "${config.password}""""
+        parts += """"packet_encoding": "xudp""""
 
         config.tls?.let { parts += buildTlsBlock(it) }
         config.transport?.let {
@@ -233,25 +390,150 @@ object SingBoxConfigBuilder {
         return parts.joinToString(",\n")
     }
 
-    private fun buildWireguardFields(config: ProxyServerConfig): String {
+    private fun buildWireguardFields(
+        config: ProxyServerConfig,
+        settings: com.flowvpn.core.model.AppSettings? = null,
+    ): String {
+        val warpConfig = settings?.getWarpConfig()
+        val privateKey = config.privateKey?.takeIf { it.isNotBlank() } ?: warpConfig?.privateKey ?: ""
+        val peerPublicKey = config.peerPublicKey?.takeIf { it.isNotBlank() } ?: warpConfig?.peerPublicKey ?: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+
         val parts = mutableListOf<String>()
-        parts += """"private_key": "${config.privateKey}""""
-        parts += """"peer_public_key": "${config.peerPublicKey}""""
+        parts += """"private_key": "$privateKey""""
+        parts += """"peer_public_key": "$peerPublicKey""""
 
         config.preSharedKey?.let { parts += """"pre_shared_key": "$it"""" }
 
-        config.localAddresses?.let { addrs ->
-            val addrList = addrs.joinToString(",") { "\"$it\"" }
-            parts += """"local_address": [$addrList]"""
-        }
+        val effectiveLocalAddrs = config.localAddresses?.takeIf { it.isNotEmpty() }
+            ?: warpConfig?.let { listOf(it.localAddressV4, it.localAddressV6) }
+            ?: if (config.address.contains("cloudflare") || config.name.contains("WARP", ignoreCase = true) || config.address.startsWith("162.159.") || config.address.startsWith("188.114.")) {
+                listOf("172.16.0.2/32", "2606:4700:110:8::1/128")
+            } else listOf("172.16.0.2/32")
 
-        config.reserved?.let { bytes ->
-            parts += """"reserved": [${bytes.joinToString(",")}]"""
-        }
+        val addrList = effectiveLocalAddrs.joinToString(",") { "\"$it\"" }
+        parts += """"local_address": [$addrList]"""
 
-        config.wireguardMtu?.let { parts += """"mtu": $it""" }
+        val effectiveReserved = config.reserved?.takeIf { it.isNotEmpty() && it != listOf(0, 0, 0) }
+            ?: warpConfig?.reserved?.takeIf { it.isNotEmpty() && it != listOf(0, 0, 0) }
+            ?: config.reserved?.takeIf { it.isNotEmpty() }
+            ?: listOf(0, 0, 0)
+
+        parts += """"reserved": [${effectiveReserved.joinToString(",")}]"""
+
+        val effectiveMtu = config.wireguardMtu ?: warpConfig?.mtu ?: 1280
+        parts += """"mtu": $effectiveMtu"""
 
         return parts.joinToString(",\n")
+    }
+
+    /**
+     * Сгенерировать Endpoint-блок для протокола WireGuard (формат sing-box 1.12+ / 1.14+).
+     * В sing-box 1.12+ WireGuard перенесен из outbounds в endpoints и использует peers & address.
+     */
+    private fun buildWireguardEndpoint(
+        config: ProxyServerConfig,
+        tag: String = "proxy",
+        detour: String? = null,
+        settings: com.flowvpn.core.model.AppSettings? = null,
+    ): String {
+        val warpConfig = settings?.getWarpConfig()
+        val privateKey = config.privateKey?.takeIf { it.isNotBlank() } ?: warpConfig?.privateKey ?: ""
+        val peerPublicKey = config.peerPublicKey?.takeIf { it.isNotBlank() } ?: warpConfig?.peerPublicKey ?: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+
+        val effectiveLocalAddrs = config.localAddresses?.takeIf { it.isNotEmpty() }
+            ?: warpConfig?.let { listOf(it.localAddressV4, it.localAddressV6) }
+            ?: if (config.address.contains("cloudflare") || config.name.contains("WARP", ignoreCase = true) || config.address.startsWith("162.159.") || config.address.startsWith("188.114.")) {
+                listOf("172.16.0.2/32", "2606:4700:110:8::1/128")
+            } else listOf("172.16.0.2/32")
+
+        val addrList = effectiveLocalAddrs.joinToString(",") { "\"$it\"" }
+        val effectiveMtu = config.wireguardMtu ?: warpConfig?.mtu ?: 1280
+
+        val peerParts = mutableListOf<String>()
+        peerParts += """"address": "${config.address}""""
+        peerParts += """"port": ${config.port}"""
+        peerParts += """"public_key": "$peerPublicKey""""
+        peerParts += """"allowed_ips": ["0.0.0.0/0", "::/0"]"""
+        config.preSharedKey?.let { peerParts += """"pre_shared_key": "$it"""" }
+
+        val peersBlock = peerParts.joinToString(",")
+        val parts = mutableListOf<String>()
+        parts += """"type": "wireguard""""
+        parts += """"tag": "$tag""""
+        parts += """"address": [$addrList]"""
+        parts += """"private_key": "$privateKey""""
+        parts += """"peers": [{$peersBlock}]"""
+        parts += """"mtu": $effectiveMtu"""
+        detour?.let { parts += """"detour": "$it"""" }
+
+        return "{\n" + parts.joinToString(",\n") + "\n}"
+    }
+
+    /**
+     * Сгенерировать JSON-блок outbound для Cloudflare WARP.
+     * В зависимости от warpMode генерирует:
+     * - WireGuard (классический UDP)
+     * - MASQUE (HTTP/2 TCP или HTTP/3 QUIC)
+     * Трафик направляется через detour: "proxy" для реализации цепочки VPN -> WARP.
+     */
+    private fun buildWarpOutbound(warp: com.flowvpn.core.model.WarpConfig): String {
+        return when (warp.warpMode) {
+            com.flowvpn.core.model.WarpMode.WIREGUARD -> {
+                val parts = mutableListOf<String>()
+                parts += """"type": "wireguard""""
+                parts += """"tag": "warp""""
+                parts += """"server": "${warp.endpointHost}""""
+                parts += """"server_port": ${warp.endpointPort}"""
+                parts += """"private_key": "${warp.privateKey}""""
+                parts += """"peer_public_key": "${warp.peerPublicKey}""""
+                parts += """"local_address": ["${warp.localAddressV4}", "${warp.localAddressV6}"]"""
+                if (warp.reserved.isNotEmpty()) {
+                    parts += """"reserved": [${warp.reserved.joinToString(",")}]"""
+                }
+                parts += """"mtu": ${warp.mtu}"""
+                parts += """"detour": "proxy""""
+
+                "{\n" + parts.joinToString(",\n") + "\n}"
+            }
+            com.flowvpn.core.model.WarpMode.MASQUE_H2,
+            com.flowvpn.core.model.WarpMode.MASQUE_H3 -> {
+                val useHttp2 = warp.warpMode == com.flowvpn.core.model.WarpMode.MASQUE_H2
+                val parts = mutableListOf<String>()
+                parts += """"type": "masque""""
+                parts += """"tag": "warp""""
+                parts += """"detour": "proxy""""
+                parts += """"use_http2": $useHttp2"""
+                val effectiveAddress = if (warp.endpointHost.isBlank() || warp.endpointHost == "0.0.0.0") {
+                    if (useHttp2) "162.159.198.2" else "162.159.192.1"
+                } else warp.endpointHost
+                if (effectiveAddress.isNotBlank() && effectiveAddress != "0.0.0.0") {
+                    parts += """"address": "$effectiveAddress""""
+                    parts += """"port": ${if (warp.endpointPort > 0) warp.endpointPort else 443}"""
+                }
+                val profileParts = mutableListOf<String>()
+                profileParts += """"detour": "proxy""""
+                if (warp.accessToken.isNotBlank()) {
+                    profileParts += """"auth_token": "${escapeJson(warp.accessToken)}""""
+                }
+                if (warp.accountId.isNotBlank()) {
+                    profileParts += """"id": "${escapeJson(warp.accountId)}""""
+                }
+                if (warp.licenseKey.isNotBlank()) {
+                    profileParts += """"license_key": "${escapeJson(warp.licenseKey)}""""
+                }
+                parts += """"profile": {${profileParts.joinToString(",")}}"""
+                parts += """
+                    "tls": {
+                        "server_name": "consumer-masque.cloudflareclient.com",
+                        "insecure": true,
+                        "fragment": true,
+                        "record_fragment": true
+                    }
+                """.trimIndent()
+
+                "{\n" + parts.joinToString(",\n") + "\n}"
+            }
+        }
     }
 
     /**
@@ -354,24 +636,22 @@ object SingBoxConfigBuilder {
             else -> ""
         }
 
-        val inet6AddressField = if (settings.blockIpv6) {
-            ""
-        } else {
-            """"inet6_address": "fdfe:dcba:9876::1/126","""
+        val addressList = mutableListOf<String>()
+        addressList += "\"172.19.0.1/30\""
+        if (!settings.blockIpv6) {
+            addressList += "\"fdfe:dcba:9876::1/126\""
         }
+        val addressField = """"address": [${addressList.joinToString(", ")}],"""
 
         return """
         {
             "type": "tun",
             "tag": "tun-in",
-            "inet4_address": "172.19.0.1/30",
-            $inet6AddressField
+            $addressField
             "mtu": ${settings.mtu},
             "stack": "gvisor",
             "auto_route": true,
             "strict_route": false,
-            "sniff": true,
-            "sniff_override_destination": true,
             $packageFilterField
             "platform": {
                 "http_proxy": {
@@ -389,50 +669,142 @@ object SingBoxConfigBuilder {
      * Домены прокси-серверов всегда резолвятся через direct-dns (local с detour direct)
      * ДО правил FakeDNS, что устраняет циклические дедлоки и потерю связи.
      */
+    /**
+     * Сформировать объект DNS-сервера в формате sing-box 1.14.0 (каждый сервер имеет свой "type").
+     * Форматы "address" устарели в 1.12.0 и удалены в 1.14.0.
+     */
+    private fun buildDnsServerObject(
+        tag: String,
+        address: String,
+        detour: String,
+        domainResolver: String? = null,
+    ): String {
+        val trimmed = address.trim()
+        if (trimmed.isEmpty() || trimmed == "local") {
+            return """
+                {
+                    "tag": "$tag",
+                    "type": "local",
+                    "detour": "$detour"
+                }
+            """.trimIndent()
+        }
+
+        val fields = mutableListOf<String>()
+        fields += """"tag": "$tag""""
+
+        if (trimmed.startsWith("https://", ignoreCase = true)) {
+            val uri = java.net.URI(trimmed)
+            val host = uri.host ?: trimmed.removePrefix("https://").substringBefore('/')
+            val port = if (uri.port > 0) uri.port else 443
+            val path = if (!uri.rawPath.isNullOrEmpty()) uri.rawPath else "/dns-query"
+            fields += """"type": "https""""
+            fields += """"server": "$host""""
+            fields += """"server_port": $port"""
+            fields += """"path": "$path""""
+            if (!domainResolver.isNullOrEmpty() && !isIpAddress(host)) {
+                fields += """"domain_resolver": "$domainResolver""""
+            }
+            fields += """"detour": "$detour""""
+            return "{\n                    " + fields.joinToString(",\n                    ") + "\n                }"
+        }
+
+        if (trimmed.startsWith("h3://", ignoreCase = true)) {
+            val uri = java.net.URI(trimmed)
+            val host = uri.host ?: trimmed.removePrefix("h3://").substringBefore('/')
+            val port = if (uri.port > 0) uri.port else 443
+            val path = if (!uri.rawPath.isNullOrEmpty()) uri.rawPath else "/dns-query"
+            fields += """"type": "h3""""
+            fields += """"server": "$host""""
+            fields += """"server_port": $port"""
+            fields += """"path": "$path""""
+            if (!domainResolver.isNullOrEmpty() && !isIpAddress(host)) {
+                fields += """"domain_resolver": "$domainResolver""""
+            }
+            fields += """"detour": "$detour""""
+            return "{\n                    " + fields.joinToString(",\n                    ") + "\n                }"
+        }
+
+        if (trimmed.startsWith("tls://", ignoreCase = true)) {
+            val withoutScheme = trimmed.removePrefix("tls://")
+            val host = withoutScheme.substringBefore(':')
+            val port = withoutScheme.substringAfter(':', "853").toIntOrNull() ?: 853
+            fields += """"type": "tls""""
+            fields += """"server": "$host""""
+            fields += """"server_port": $port"""
+            if (!domainResolver.isNullOrEmpty() && !isIpAddress(host)) {
+                fields += """"domain_resolver": "$domainResolver""""
+            }
+            fields += """"detour": "$detour""""
+            return "{\n                    " + fields.joinToString(",\n                    ") + "\n                }"
+        }
+
+        if (trimmed.startsWith("tcp://", ignoreCase = true)) {
+            val withoutScheme = trimmed.removePrefix("tcp://")
+            val host = withoutScheme.substringBefore(':')
+            val port = withoutScheme.substringAfter(':', "53").toIntOrNull() ?: 53
+            fields += """"type": "tcp""""
+            fields += """"server": "$host""""
+            fields += """"server_port": $port"""
+            if (!domainResolver.isNullOrEmpty() && !isIpAddress(host)) {
+                fields += """"domain_resolver": "$domainResolver""""
+            }
+            fields += """"detour": "$detour""""
+            return "{\n                    " + fields.joinToString(",\n                    ") + "\n                }"
+        }
+
+        val cleanHost = trimmed.removePrefix("udp://")
+        val host = cleanHost.substringBefore(':')
+        val port = cleanHost.substringAfter(':', "53").toIntOrNull() ?: 53
+        fields += """"type": "udp""""
+        fields += """"server": "$host""""
+        fields += """"server_port": $port"""
+        if (!domainResolver.isNullOrEmpty() && !isIpAddress(host)) {
+            fields += """"domain_resolver": "$domainResolver""""
+        }
+        fields += """"detour": "$detour""""
+        return "{\n                    " + fields.joinToString(",\n                    ") + "\n                }"
+    }
+
     private fun buildDns(
         config: ProxyServerConfig,
         settings: com.flowvpn.core.model.AppSettings,
+        isWarpActive: Boolean = false,
     ): String {
         val dnsAddress = settings.getEffectiveDnsAddress()
         val strategy = if (settings.blockIpv6) "ipv4_only" else "prefer_ipv4"
+        val remoteDetour = if (isWarpActive) "warp" else "proxy"
 
         val directDnsServer = """
             {
                 "tag": "direct-dns",
-                "address": "local",
+                "type": "local",
                 "detour": "direct"
             }
         """.trimIndent()
 
-        val remoteDnsServer = if (dnsAddress == "local") {
-            """
-            {
-                "tag": "remote-dns",
-                "address": "local",
-                "detour": "direct"
-            }
-            """.trimIndent()
-        } else {
-            """
-            {
-                "tag": "remote-dns",
-                "address": "$dnsAddress",
-                "address_resolver": "direct-dns",
-                "detour": "proxy"
-            }
-            """.trimIndent()
-        }
+        val remoteDnsServer = buildDnsServerObject(
+            tag = "remote-dns",
+            address = dnsAddress,
+            detour = remoteDetour,
+            domainResolver = "direct-dns",
+        )
 
         val dnsServers = mutableListOf<String>()
         dnsServers += remoteDnsServer
         if (dnsAddress != "local") {
-            dnsServers += """
-                {
-                    "tag": "remote-dns-fallback",
-                    "address": "tcp://1.1.1.1",
-                    "detour": "proxy"
-                }
-            """.trimIndent()
+            dnsServers += buildDnsServerObject(
+                tag = "remote-dns-google",
+                address = "https://8.8.8.8/dns-query",
+                detour = remoteDetour,
+                domainResolver = "direct-dns",
+            )
+            dnsServers += buildDnsServerObject(
+                tag = "remote-dns-cloudflare",
+                address = "https://1.1.1.1/dns-query",
+                detour = remoteDetour,
+                domainResolver = "direct-dns",
+            )
         }
         dnsServers += directDnsServer
 
@@ -460,15 +832,31 @@ object SingBoxConfigBuilder {
             dnsRules += """
                 {
                     "domain": [$domainsJson],
+                    "action": "route",
                     "server": "direct-dns"
                 }
             """.trimIndent()
         }
 
+        // 1.1. Домены инфраструктуры Cloudflare (API регистрации и обновления)
+        // Всегда направляем через remote-dns (защищенный VPN-туннель),
+        // так как в РФ домены api.cloudflareclient.com блокируются ТСПУ на прямом подключении.
+        dnsRules += """
+            {
+                "domain": [
+                    "api.cloudflareclient.com",
+                    "cloudflareclient.com"
+                ],
+                "action": "route",
+                "server": "remote-dns"
+            }
+        """.trimIndent()
+
         // 2. DNS-запросы от прямого трафика — в direct-dns
         dnsRules += """
             {
                 "outbound": "direct",
+                "action": "route",
                 "server": "direct-dns"
             }
         """.trimIndent()
@@ -481,6 +869,7 @@ object SingBoxConfigBuilder {
             dnsRules += """
                 {
                     "domain_suffix": [$carrierDomainsJson],
+                    "action": "route",
                     "server": "direct-dns"
                 }
             """.trimIndent()
@@ -504,6 +893,7 @@ object SingBoxConfigBuilder {
                         "domain_suffix": [
                             $domainsJson
                         ],
+                        "action": "route",
                         "server": "direct-dns"
                     }
                 """.trimIndent()
@@ -521,6 +911,7 @@ object SingBoxConfigBuilder {
             dnsRules += """
                 {
                     "query_type": ["A", "AAAA"],
+                    "action": "route",
                     "server": "fakeip-dns"
                 }
             """.trimIndent()
@@ -549,7 +940,7 @@ object SingBoxConfigBuilder {
      *
      * Поддерживает:
      * - Вывод трафика к самому прокси-серверу в direct (защита от зацикливания сокетов)
-     * - Перенаправление DNS-трафика (порт 53 и протокол dns) в dns-out
+     * - Перехват DNS-трафика (порт 53 и протокол dns) через hijack-dns
      * - Блокировку IPv6 (защита от утечек)
      * - Обход локальной сети (Bypass LAN / ip_is_private)
      * - Обход сайтов РФ (Российские сервисы напрямую: .ru, .рф, банки, госуслуги)
@@ -557,20 +948,22 @@ object SingBoxConfigBuilder {
     private fun buildRoute(
         config: ProxyServerConfig,
         settings: com.flowvpn.core.model.AppSettings,
+        isWarpActive: Boolean = false,
+        outlineBridgePort: Int? = null,
     ): String {
         val rules = mutableListOf<String>()
 
-        // 1. DNS трафик — перенаправление в outbound dns-out
+        // 1. DNS трафик — немедленный перехват через hijack-dns в первую очередь
         rules += """
             {
-                "protocol": "dns",
-                "outbound": "dns-out"
+                "port": [53],
+                "action": "hijack-dns"
             }
         """.trimIndent()
         rules += """
             {
-                "port": [53],
-                "outbound": "dns-out"
+                "protocol": "dns",
+                "action": "hijack-dns"
             }
         """.trimIndent()
 
@@ -578,7 +971,7 @@ object SingBoxConfigBuilder {
         rules += """
             {
                 "port": [853],
-                "outbound": "block"
+                "action": "reject"
             }
         """.trimIndent()
 
@@ -587,9 +980,20 @@ object SingBoxConfigBuilder {
             {
                 "port": [443],
                 "network": "udp",
-                "outbound": "block"
+                "action": "reject"
             }
         """.trimIndent()
+
+        // 4. Sniffing входящего трафика для определения доменов (только если включен в настройках)
+        if (settings.sniffing && (settings.bypassRussianTraffic || settings.customBypassDomains.isNotEmpty())) {
+            rules += """
+                {
+                    "action": "sniff",
+                    "sniffer": ["tls", "http", "quic"],
+                    "timeout": "100ms"
+                }
+            """.trimIndent()
+        }
 
         // 4. Трафик к самому прокси-серверу — ВСЕГДА direct, чтобы исключить петлю маршрутизации
         val serverHost = config.address.trim()
@@ -612,31 +1016,58 @@ object SingBoxConfigBuilder {
             }
         }
 
-        // 4.1. Защита от зацикливания OpenFlux (локальный туннель к Яндекс/MAX)
+        if (config.protocol == ProxyProtocol.MASQUE && !isWarpActive) {
+            val masqueHost = config.address.trim()
+            val masqueIps = mutableListOf("162.159.198.2/32", "162.159.192.1/32", "162.159.193.1/32")
+            if (masqueHost.isNotEmpty() && isIpAddress(masqueHost)) {
+                val cidr = if (masqueHost.contains(":")) "$masqueHost/128" else "$masqueHost/32"
+                if (!masqueIps.contains(cidr)) masqueIps.add(cidr)
+            }
+            val ipsJson = masqueIps.joinToString(",") { "\"$it\"" }
+            rules += """
+                {
+                    "ip_cidr": [$ipsJson],
+                    "outbound": "direct"
+                }
+            """.trimIndent()
+        }
+
+        // 4.1. Защита от зацикливания OpenFlux и OutlineBridge (локальный туннель к Яндекс/MAX/127.0.0.1)
         val isOpenFlux = config.protocol == ProxyProtocol.OPENFLUX ||
                 (config.protocol == ProxyProtocol.SOCKS5 && (config.address == "127.0.0.1" || config.address == "localhost"))
-        if (isOpenFlux) {
+        if (isOpenFlux || outlineBridgePort != null) {
             rules += """
                 {
                     "ip_cidr": ["127.0.0.0/8", "::1/128"],
                     "outbound": "direct"
                 }
             """.trimIndent()
-            val carrierDomainsJson = OPENFLUX_CARRIER_DOMAINS.joinToString(",") { "\"$it\"" }
-            rules += """
-                {
-                    "domain_suffix": [$carrierDomainsJson],
-                    "outbound": "direct"
-                }
-            """.trimIndent()
+            if (isOpenFlux) {
+                val carrierDomainsJson = OPENFLUX_CARRIER_DOMAINS.joinToString(",") { "\"$it\"" }
+                rules += """
+                    {
+                        "domain_suffix": [$carrierDomainsJson],
+                        "outbound": "direct"
+                    }
+                """.trimIndent()
+            }
         }
+
+        // 4.2. API регистрации Cloudflare WARP:
+        // Всегда направляется через первичный VPN (proxy) для надежного обхода блокировок ТСПУ в РФ.
+        rules += """
+            {
+                "domain": ["api.cloudflareclient.com", "cloudflareclient.com"],
+                "outbound": "proxy"
+            }
+        """.trimIndent()
 
         // 5. Блокировка IPv6 при включенной защите от утечек
         if (settings.blockIpv6) {
             rules += """
                 {
                     "ip_version": 6,
-                    "outbound": "block"
+                    "action": "reject"
                 }
             """.trimIndent()
         }
@@ -676,6 +1107,7 @@ object SingBoxConfigBuilder {
         }
 
         val rulesJson = rules.joinToString(",\n")
+        val finalOutbound = if (isWarpActive) "warp" else "proxy"
 
         return """
             "route": {
@@ -683,7 +1115,7 @@ object SingBoxConfigBuilder {
                     $rulesJson
                 ],
                 "auto_detect_interface": true,
-                "final": "proxy"
+                "final": "$finalOutbound"
             }
         """.trimIndent()
     }
@@ -703,5 +1135,15 @@ object SingBoxConfigBuilder {
             ProxyProtocol.SOCKS5 -> "socks"
             ProxyProtocol.HTTP -> "http"
             ProxyProtocol.OPENFLUX -> "socks"
+            ProxyProtocol.MASQUE -> "masque"
         }
+
+    private fun escapeJson(value: String): String {
+        return value.replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\b", "\\b")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+    }
 }

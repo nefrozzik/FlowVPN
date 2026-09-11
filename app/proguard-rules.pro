@@ -8,8 +8,6 @@
 
 # sing-box libbox / Hiddify Core — JNI bridge (не обфусцировать)
 -keep class io.nekohasekai.libbox.** { *; }
--keep class com.hiddify.core.libbox.** { *; }
--keep class com.hiddify.core.mobile.** { *; }
 -keep class go.** { *; }
 -keep class com.flowvpn.vpn.** { *; }
 

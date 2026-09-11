@@ -21,7 +21,7 @@ import com.flowvpn.core.model.AppSettings
 import com.flowvpn.core.model.DnsProvider
 import com.flowvpn.core.model.ProxyServerConfig
 import com.flowvpn.core.state.VpnStateManager
-import com.hiddify.core.libbox.TunOptions
+import io.nekohasekai.libbox.TunOptions
 
 /**
  * Основной VPN-сервис приложения FlowVPN.
@@ -52,6 +52,7 @@ class FlowVpnService : VpnService() {
     }
     internal val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main + coroutineExceptionHandler)
     private var boxManager: BoxServiceManager? = null
+    private var outlineBridge: com.flowvpn.vpn.outline.OutlineBridge? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) {
@@ -97,6 +98,63 @@ class FlowVpnService : VpnService() {
         isStopping.set(false)
         CoreLogManager.log("Инициализация VPN-сервиса (Sing-box Core)...", tag = "VPN")
         VpnStateManager.updateState(com.flowvpn.core.model.VpnState.Connecting)
+
+        val selectedServer = loadSelectedServer()
+        val underlyingProxy = loadUnderlyingProxy()
+
+        val activeBridgeServer = if (selectedServer?.protocol == com.flowvpn.core.model.ProxyProtocol.WIREGUARD && underlyingProxy != null) {
+            underlyingProxy
+        } else {
+            selectedServer
+        }
+
+        if (activeBridgeServer?.protocol == com.flowvpn.core.model.ProxyProtocol.SHADOWSOCKS && activeBridgeServer.password.isNullOrBlank()) {
+            val errorMsg = "У сервера Outline/Shadowsocks отсутствует пароль. Если это ссылка ssconf://, добавьте её через экран Подписок."
+            VpnStateManager.setError(errorMsg)
+            CoreLogManager.log(errorMsg, LogLevel.ERROR, tag = "Outline")
+            stopSelf()
+            return
+        }
+
+        if (activeBridgeServer?.protocol == com.flowvpn.core.model.ProxyProtocol.SHADOWSOCKS && !activeBridgeServer.prefix.isNullOrBlank()) {
+            try {
+                outlineBridge?.stop()
+                val bridge = com.flowvpn.vpn.outline.OutlineBridge(
+                    serverHost = activeBridgeServer.address,
+                    serverPort = activeBridgeServer.port,
+                    method = activeBridgeServer.method ?: "chacha20-ietf-poly1305",
+                    password = activeBridgeServer.password ?: "",
+                    prefix = activeBridgeServer.prefix ?: "",
+                    vpnService = this,
+                )
+                val bridgePort = bridge.start()
+                outlineBridge = bridge
+
+                val logDesc = if (selectedServer?.protocol == com.flowvpn.core.model.ProxyProtocol.WIREGUARD) {
+                    "Цепочка Cloudflare WARP ➔ Outline: ${activeBridgeServer.name} (${activeBridgeServer.address}:${activeBridgeServer.port}) с префиксом обхода DPI через OutlineBridge (порт $bridgePort)"
+                } else {
+                    "Подключение к Outline: ${activeBridgeServer.name} (${activeBridgeServer.address}:${activeBridgeServer.port}) с префиксом обхода DPI через OutlineBridge (порт $bridgePort)"
+                }
+                CoreLogManager.log(logDesc, LogLevel.INFO, tag = "Outline")
+                patchConfigForOutlineBridge(configPath, bridgePort)
+            } catch (e: Exception) {
+                Timber.e(e, "FlowVpnService: Ошибка запуска OutlineBridge")
+                CoreLogManager.log("Ошибка запуска OutlineBridge: ${e.message}", LogLevel.ERROR, tag = "Outline")
+            }
+        } else if (activeBridgeServer?.isOutline == true) {
+            val logDesc = if (selectedServer?.protocol == com.flowvpn.core.model.ProxyProtocol.WIREGUARD) {
+                "Цепочка Cloudflare WARP ➔ Outline: ${activeBridgeServer.name} (${activeBridgeServer.address}:${activeBridgeServer.port})"
+            } else {
+                "Подключение к Outline: ${activeBridgeServer.name} (${activeBridgeServer.address}:${activeBridgeServer.port})"
+            }
+            CoreLogManager.log(logDesc, LogLevel.INFO, tag = "Outline")
+        } else if (selectedServer?.protocol == com.flowvpn.core.model.ProxyProtocol.WIREGUARD) {
+            if (underlyingProxy != null) {
+                CoreLogManager.log("Цепочка Cloudflare WARP ➔ ${underlyingProxy.name} (${underlyingProxy.protocol})", LogLevel.INFO, tag = "WARP")
+            } else {
+                CoreLogManager.log("Прямое подключение к Cloudflare WARP (WireGuard ${selectedServer.address}:${selectedServer.port}). В РФ прямое соединение может блокироваться ТСПУ.", LogLevel.INFO, tag = "WARP")
+            }
+        }
 
         val notification = ServiceNotification.createNotification(
             context = this,
@@ -150,6 +208,12 @@ class FlowVpnService : VpnService() {
                 boxManager = null
             } catch (e: Exception) {
                 Timber.e(e, "FlowVpnService: Ошибка остановки ядра")
+            }
+            try {
+                outlineBridge?.stop()
+                outlineBridge = null
+            } catch (e: Exception) {
+                Timber.w(e, "FlowVpnService: Ошибка при остановке OutlineBridge")
             } finally {
                 closeTunInterface()
                 DefaultNetworkMonitor.stop()
@@ -308,7 +372,10 @@ class FlowVpnService : VpnService() {
                     if (!blockIpv6) addRoute("::", 0)
                 }
 
-                val coreDns = runCatching { options.dnsServerAddress.value }.getOrNull()?.trim()
+                val coreDns = runCatching {
+                    val it = options.dnsServerAddress
+                    if (it != null && it.hasNext()) it.next() else null
+                }.getOrNull()?.trim()
                 val dnsToUse = if (!coreDns.isNullOrBlank()) coreDns else "172.19.0.2"
                 try {
                     addDnsServer(dnsToUse)
@@ -363,8 +430,7 @@ class FlowVpnService : VpnService() {
     }
 
     private fun loadSelectedServer(): ProxyServerConfig? {
-        VpnStateManager.activeServerConfig?.let { return it }
-        return try {
+        val server = VpnStateManager.activeServerConfig ?: try {
             val serverFile = java.io.File(filesDir, "selected_server.json")
             if (serverFile.exists()) {
                 val json = org.json.JSONObject(serverFile.readText())
@@ -374,6 +440,48 @@ class FlowVpnService : VpnService() {
             } else null
         } catch (e: Exception) {
             Timber.w(e, "FlowVpnService: Не удалось загрузить selected_server.json")
+            null
+        }
+
+        if (server != null) {
+            var fixed = server
+            if (fixed.protocol == com.flowvpn.core.model.ProxyProtocol.SHADOWSOCKS && fixed.address.contains("webdisk.awfulfabo.cyou") && fixed.port == 443) {
+                fixed = fixed.copy(port = 47893)
+            }
+            if (fixed.protocol == com.flowvpn.core.model.ProxyProtocol.WIREGUARD) {
+                val localAddrs = fixed.localAddresses?.takeIf { it.isNotEmpty() }
+                    ?: if (fixed.address.contains("cloudflare") || fixed.name.contains("WARP", ignoreCase = true) || fixed.address.startsWith("162.159.") || fixed.address.startsWith("188.114.")) {
+                        listOf("172.16.0.2/32", "2606:4700:110:8::1/128")
+                    } else listOf("172.16.0.2/32")
+                val res = fixed.reserved?.takeIf { it.isNotEmpty() }
+                    ?: if (fixed.address.contains("cloudflare") || fixed.name.contains("WARP", ignoreCase = true) || fixed.address.startsWith("162.159.") || fixed.address.startsWith("188.114.")) {
+                        listOf(0, 0, 0)
+                    } else null
+                val mtu = fixed.wireguardMtu ?: 1280
+                fixed = fixed.copy(localAddresses = localAddrs, reserved = res, wireguardMtu = mtu)
+            }
+            if (fixed !== server) {
+                VpnStateManager.activeServerConfig = fixed
+            }
+            return fixed
+        }
+        return null
+    }
+
+    private fun loadUnderlyingProxy(): ProxyServerConfig? {
+        return try {
+            val file = java.io.File(filesDir, "sing-box/underlying_proxy.json")
+            if (file.exists()) {
+                val json = org.json.JSONObject(file.readText())
+                val config = ProxyServerConfig.fromJson(json)
+                if (config.protocol == com.flowvpn.core.model.ProxyProtocol.SHADOWSOCKS && config.address.contains("webdisk.awfulfabo.cyou") && config.port == 443) {
+                    config.copy(port = 47893)
+                } else {
+                    config
+                }
+            } else null
+        } catch (e: Exception) {
+            Timber.w(e, "FlowVpnService: Не удалось загрузить underlying_proxy.json")
             null
         }
     }
@@ -416,6 +524,10 @@ class FlowVpnService : VpnService() {
                     autoConnect = json.optBoolean("autoConnect", false),
                     autoUpdateSubscriptions = json.optBoolean("autoUpdateSubscriptions", true),
                     autoUpdateIntervalHours = json.optInt("autoUpdateIntervalHours", 24),
+                    enableWarpChaining = json.optBoolean("enableWarpChaining", false),
+                    warpLicenseKey = json.optString("warpLicenseKey", ""),
+                    warpAccountType = json.optString("warpAccountType", ""),
+                    warpConfigJson = json.optString("warpConfigJson").takeIf { it.isNotBlank() },
                 )
             } else {
                 AppSettings()
@@ -528,6 +640,12 @@ class FlowVpnService : VpnService() {
         } catch (e: Throwable) {
             Timber.w(e, "FlowVpnService: Ошибка при остановке boxManager в onDestroy")
         }
+        try {
+            outlineBridge?.stop()
+            outlineBridge = null
+        } catch (e: Throwable) {
+            Timber.w(e, "FlowVpnService: Ошибка при остановке outlineBridge в onDestroy")
+        }
         closeTunInterface()
         DefaultNetworkMonitor.stop()
         serviceScope.cancel()
@@ -536,6 +654,61 @@ class FlowVpnService : VpnService() {
             VpnStateManager.setDisconnected()
         }
         super.onDestroy()
+    }
+
+    /**
+     * Модифицирует config.json для перенаправления outbound "proxy"
+     * на локальный SOCKS5-мост OutlineBridge (127.0.0.1:bridgePort).
+     */
+    private fun patchConfigForOutlineBridge(configPath: String, bridgePort: Int) {
+        try {
+            val file = java.io.File(configPath)
+            if (!file.exists()) return
+            val jsonText = file.readText()
+            val root = org.json.JSONObject(jsonText)
+
+            val outbounds = root.optJSONArray("outbounds")
+            if (outbounds != null) {
+                for (i in 0 until outbounds.length()) {
+                    val ob = outbounds.getJSONObject(i)
+                    if (ob.optString("tag") == "proxy") {
+                        val newProxy = org.json.JSONObject().apply {
+                            put("type", "socks")
+                            put("tag", "proxy")
+                            put("server", "127.0.0.1")
+                            put("server_port", bridgePort)
+                            put("version", "5")
+                            put("network", "tcp")
+                        }
+                        outbounds.put(i, newProxy)
+                        break
+                    }
+                }
+            }
+
+            val route = root.optJSONObject("route")
+            val rules = route?.optJSONArray("rules")
+            if (rules != null && route != null) {
+                val loopbackRule = org.json.JSONObject().apply {
+                    put("ip_cidr", org.json.JSONArray().apply {
+                        put("127.0.0.0/8")
+                        put("::1/128")
+                    })
+                    put("outbound", "direct")
+                }
+                val newRules = org.json.JSONArray()
+                newRules.put(loopbackRule)
+                for (j in 0 until rules.length()) {
+                    newRules.put(rules.get(j))
+                }
+                route.put("rules", newRules)
+            }
+
+            file.writeText(root.toString(2))
+            Timber.i("FlowVpnService: config.json успешно пропатчен для OutlineBridge (порт $bridgePort)")
+        } catch (e: Exception) {
+            Timber.e(e, "FlowVpnService: Не удалось пропатчить config.json для OutlineBridge")
+        }
     }
 
     private fun startForegroundCompat(notification: Notification) {

@@ -192,13 +192,48 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             val settings = container.settingsRepository.settings.value
+
+            val isWarpServer = server.id.startsWith("warp-") ||
+                    server.protocol == com.flowvpn.core.model.ProxyProtocol.MASQUE ||
+                    (server.protocol == com.flowvpn.core.model.ProxyProtocol.WIREGUARD &&
+                            (server.name.contains("WARP", ignoreCase = true) || server.address.startsWith("162.159.") || server.address.startsWith("188.114.")))
+
+            val underlyingProxy = if (isWarpServer && settings.enableWarpChaining) {
+                container.subscriptionRepository.getCachedSubscriptions()
+                    .flatMap { it.servers }
+                    .firstOrNull { candidate ->
+                        candidate.id != server.id &&
+                        candidate.protocol != com.flowvpn.core.model.ProxyProtocol.WIREGUARD &&
+                        candidate.protocol != com.flowvpn.core.model.ProxyProtocol.MASQUE &&
+                        (settings.warpMode != com.flowvpn.core.model.WarpMode.WIREGUARD || (!candidate.isOutline && candidate.prefix.isNullOrBlank()))
+                    }
+            } else null
+
+            val configDir = getApplication<Application>().getConfigDirectory()
+            val underlyingFile = File(configDir, "underlying_proxy.json")
+            if (underlyingProxy != null) {
+                underlyingFile.writeText(underlyingProxy.toJson().toString(2))
+                com.flowvpn.core.logger.CoreLogManager.log(
+                    "Cloudflare WARP: цепочка через прокси «${underlyingProxy.name}» (${underlyingProxy.protocol})",
+                    tag = "WARP"
+                )
+            } else {
+                if (underlyingFile.exists()) underlyingFile.delete()
+                if (isWarpServer) {
+                    com.flowvpn.core.logger.CoreLogManager.log(
+                        "Cloudflare WARP: прямое подключение (отдельный сервер WireGuard)",
+                        tag = "WARP"
+                    )
+                }
+            }
+
             val configJson = SingBoxConfigBuilder.build(
                 config = server,
                 settings = settings,
                 enabledApps = enabledApps,
                 excludedApps = excludedApps,
+                underlyingProxy = underlyingProxy,
             )
-            val configDir = getApplication<Application>().getConfigDirectory()
             val configFile = File(configDir, "config.json")
 
             configDir.mkdirs()

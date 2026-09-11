@@ -55,6 +55,13 @@ object LinkParser {
                 trimmed.startsWith("ss://", ignoreCase = true) ->
                     ShadowsocksParser.parse(trimmed)
 
+                trimmed.startsWith("ssconf://", ignoreCase = true) ->
+                    null // ssconf:// — это динамическая ссылка на профиль, обрабатывается через SubscriptionManager
+
+                trimmed.startsWith("outline://", ignoreCase = true) ||
+                trimmed.startsWith("outline-vpn://", ignoreCase = true) ->
+                    OutlineParser.parseAccessKey(trimmed)
+
                 trimmed.startsWith("trojan://", ignoreCase = true) ->
                     TrojanParser.parse(trimmed)
 
@@ -116,7 +123,10 @@ object LinkParser {
                 t.startsWith("wg://") ||
                 t.startsWith("openflux://") ||
                 t.startsWith("socks5://") ||
-                t.startsWith("socks://")
+                t.startsWith("socks://") ||
+                t.startsWith("outline://") ||
+                t.startsWith("outline-vpn://") ||
+                t.startsWith("ssconf://")
     }
 }
 
@@ -129,6 +139,19 @@ object LinkParser {
 internal object UriParseUtils {
 
     /**
+     * Безопасное URL-декодирование без искажения символов '+' в пробелы.
+     * В standard application/x-www-form-urlencoded '+' означает пробел, но в URI
+     * (base64, пароли, токены) '+' является значащим символом и не должен превращаться в пробел.
+     */
+    fun safePercentDecode(s: String): String {
+        return try {
+            java.net.URLDecoder.decode(s.replace("+", "%2B"), "UTF-8")
+        } catch (_: Exception) {
+            s
+        }
+    }
+
+    /**
      * Извлечь fragment (имя сервера) из URI.
      * Fragment — всё после `#`, URL-decoded.
      *
@@ -137,7 +160,7 @@ internal object UriParseUtils {
     fun extractFragment(uri: String): String {
         val hashIndex = uri.lastIndexOf('#')
         if (hashIndex < 0 || hashIndex >= uri.length - 1) return ""
-        return java.net.URLDecoder.decode(uri.substring(hashIndex + 1), "UTF-8")
+        return safePercentDecode(uri.substring(hashIndex + 1))
     }
 
     /**
@@ -156,8 +179,8 @@ internal object UriParseUtils {
             .filter { it.contains('=') }
             .associate { param ->
                 val eqIndex = param.indexOf('=')
-                val key = java.net.URLDecoder.decode(param.substring(0, eqIndex), "UTF-8")
-                val value = java.net.URLDecoder.decode(param.substring(eqIndex + 1), "UTF-8")
+                val key = safePercentDecode(param.substring(0, eqIndex))
+                val value = safePercentDecode(param.substring(eqIndex + 1))
                 key to value
             }
     }
@@ -170,16 +193,20 @@ internal object UriParseUtils {
      * @return Pair(host, port)
      */
     fun extractHostPort(authority: String): Pair<String, Int> {
-        return if (authority.startsWith("[")) {
+        val clean = authority.trim()
+            .substringBefore('?')
+            .substringBefore('#')
+            .trimEnd('/')
+        return if (clean.startsWith("[")) {
             // IPv6: [::1]:443
-            val closeBracket = authority.indexOf(']')
-            val host = authority.substring(1, closeBracket)
-            val port = authority.substring(closeBracket + 2).toIntOrNull() ?: 443
+            val closeBracket = clean.indexOf(']')
+            val host = clean.substring(1, closeBracket)
+            val port = clean.substring(closeBracket + 2).substringBefore('/').toIntOrNull() ?: 443
             host to port
         } else {
-            val parts = authority.split(':')
+            val parts = clean.split(':')
             val host = parts[0]
-            val port = parts.getOrNull(1)?.toIntOrNull() ?: 443
+            val port = parts.getOrNull(1)?.substringBefore('/')?.toIntOrNull() ?: 443
             host to port
         }
     }
@@ -188,10 +215,12 @@ internal object UriParseUtils {
      * Безопасное декодирование Base64 (стандартный + URL-safe).
      */
     fun decodeBase64(encoded: String): String {
-        val padded = when (encoded.length % 4) {
-            2 -> "$encoded=="
-            3 -> "$encoded="
-            else -> encoded
+        val unquoted = safePercentDecode(encoded.trim())
+
+        val padded = when (unquoted.length % 4) {
+            2 -> "$unquoted=="
+            3 -> "$unquoted="
+            else -> unquoted
         }
 
         return try {
@@ -203,7 +232,7 @@ internal object UriParseUtils {
                 String(java.util.Base64.getUrlDecoder().decode(padded))
             } catch (_: Exception) {
                 // Последняя попытка без padding
-                String(java.util.Base64.getUrlDecoder().decode(encoded))
+                String(java.util.Base64.getUrlDecoder().decode(unquoted))
             }
         }
     }

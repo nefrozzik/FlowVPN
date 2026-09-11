@@ -8,17 +8,22 @@ import android.os.Process
 import android.system.OsConstants
 import androidx.annotation.RequiresApi
 import androidx.core.content.getSystemService
-import com.hiddify.core.libbox.ConnectionOwner
-import com.hiddify.core.libbox.InterfaceUpdateListener
-import com.hiddify.core.libbox.Libbox
-import com.hiddify.core.libbox.LocalDNSTransport
-import com.hiddify.core.libbox.NetworkInterfaceIterator
-import com.hiddify.core.libbox.Notification
-import com.hiddify.core.libbox.PlatformInterface
-import com.hiddify.core.libbox.StringIterator
-import com.hiddify.core.libbox.TunOptions
-import com.hiddify.core.libbox.WIFIState
-import com.hiddify.core.libbox.NetworkInterface as LibboxNetworkInterface
+import io.nekohasekai.libbox.BridgeOptions
+import io.nekohasekai.libbox.BridgeSession
+import io.nekohasekai.libbox.ConnectionOwner
+import io.nekohasekai.libbox.InterfaceUpdateListener
+import io.nekohasekai.libbox.Libbox
+import io.nekohasekai.libbox.LocalDNSTransport
+import io.nekohasekai.libbox.NeighborUpdateListener
+import io.nekohasekai.libbox.NetworkInterfaceIterator
+import io.nekohasekai.libbox.Notification
+import io.nekohasekai.libbox.PlatformInterface
+import io.nekohasekai.libbox.PlatformUser
+import io.nekohasekai.libbox.ShellSession
+import io.nekohasekai.libbox.StringIterator
+import io.nekohasekai.libbox.TunOptions
+import io.nekohasekai.libbox.WIFIState
+import io.nekohasekai.libbox.NetworkInterface as LibboxNetworkInterface
 import timber.log.Timber
 import com.flowvpn.core.logger.CoreLogManager
 import com.flowvpn.core.logger.LogLevel
@@ -58,6 +63,10 @@ class FlowPlatformInterface(
             CoreLogManager.log("Критическая ошибка: не удалось защитить сокет sing-box (protect() failed).", LogLevel.ERROR, tag = "SingBox")
             // Убрали throw, чтобы избежать JNI DETECTED ERROR IN APPLICATION крашей (система сама дропнет пакет или уйдет в таймаут)
         }
+    }
+
+    override fun bindInterfaceControl(fd: Int, interfaceName: String) {
+        autoDetectInterfaceControl(fd)
     }
 
     /**
@@ -101,7 +110,7 @@ class FlowPlatformInterface(
                 val packages = vpnService.packageManager.getPackagesForUid(uid)
                 val packageName = packages?.firstOrNull() ?: ""
                 owner.userName = packageName
-                owner.androidPackageName = packageName
+                owner.setAndroidPackageNames(StringArray(if (packageName.isNotEmpty()) listOf(packageName) else emptyList()))
             }
         } catch (t: Throwable) {
             Timber.v("findConnectionOwner error: ${t.message}")
@@ -208,9 +217,42 @@ class FlowPlatformInterface(
 
     override fun sendNotification(notification: Notification) {}
 
+    override fun cancelNotification(tag: String, id: Int) {}
+
+    override fun checkPlatformShell() {}
+
+    override fun closeNeighborMonitor(listener: NeighborUpdateListener) {}
+
+    override fun createBridge(options: BridgeOptions?): BridgeSession? = null
+
+    override fun lookupSFTPServer(): String = ""
+
+    override fun lookupUser(name: String): PlatformUser? = null
+
+    override fun openShellSession(
+        user: PlatformUser?,
+        cmd: String,
+        args: StringIterator?,
+        dir: String,
+        width: Int,
+        height: Int,
+    ): ShellSession? = null
+
+    override fun readSystemSSHHostKey(): String = ""
+
+    override fun registerMyInterface(name: String) {}
+
+    override fun startNeighborMonitor(listener: NeighborUpdateListener) {}
+
+    override fun tailscaleHostname(): String = ""
+
+    override fun usePlatformBridge(): Boolean = false
+
+    override fun usePlatformShell(): Boolean = false
+
     override fun localDNSTransport(): LocalDNSTransport? = LocalResolver
 
-    override fun systemCertificates(): StringIterator {
+    fun systemCertificates(): StringIterator {
         val certs = mutableListOf<String>()
         try {
             val ks = KeyStore.getInstance("AndroidCAStore")

@@ -39,6 +39,18 @@ data class ProxyServerConfig(
     /** Метод шифрования — для Shadowsocks (e.g., "2022-blake3-aes-128-gcm") */
     val method: String? = null,
 
+    /** Плагин SIP003 для Shadowsocks (e.g., "obfs-local", "v2ray-plugin") */
+    val plugin: String? = null,
+
+    /** Параметры плагина SIP003 (e.g., "obfs=http;obfs-host=...") */
+    val pluginOpts: String? = null,
+
+    /** Префикс обхода DPI Outline (e.g., "POST / HTTP/1.1\r\n") */
+    val prefix: String? = null,
+
+    /** Флаг сервера Outline (Shadowsocks с параметрами Outline) */
+    val isOutline: Boolean = false,
+
     /** Тип безопасности — "tls", "reality", "none" */
     val security: String? = null,
 
@@ -125,6 +137,10 @@ data class ProxyServerConfig(
             putOpt("uuid", uuid)
             putOpt("password", password)
             putOpt("method", method)
+            putOpt("plugin", plugin)
+            putOpt("pluginOpts", pluginOpts)
+            putOpt("prefix", prefix)
+            put("isOutline", isOutline)
             putOpt("security", security)
             put("alterId", alterId)
             putOpt("flow", flow)
@@ -142,6 +158,17 @@ data class ProxyServerConfig(
             putOpt("subscriptionId", subscriptionId)
             putOpt("latencyMs", latencyMs)
             putOpt("country", country)
+            putOpt("wireguardMtu", wireguardMtu)
+            localAddresses?.let { addrs ->
+                val arr = org.json.JSONArray()
+                addrs.forEach { arr.put(it) }
+                put("localAddresses", arr)
+            }
+            reserved?.let { res ->
+                val arr = org.json.JSONArray()
+                res.forEach { arr.put(it) }
+                put("reserved", arr)
+            }
 
             tls?.let { t ->
                 put("tls", org.json.JSONObject().apply {
@@ -204,15 +231,52 @@ data class ProxyServerConfig(
                 )
             }
 
+            val localAddrs = sObj.optJSONArray("localAddresses")?.let { arr ->
+                val list = mutableListOf<String>()
+                for (i in 0 until arr.length()) list.add(arr.getString(i))
+                list
+            }
+            val reservedList = sObj.optJSONArray("reserved")?.let { arr ->
+                val list = mutableListOf<Int>()
+                for (i in 0 until arr.length()) list.add(arr.getInt(i))
+                list
+            }
+            var port = sObj.optInt("port", 443)
+            val address = sObj.optString("address", "127.0.0.1")
+            val serverName = sObj.optString("name", "Unknown Server")
+            if (protocol == ProxyProtocol.SHADOWSOCKS && address.contains("webdisk.awfulfabo.cyou") && port == 443) {
+                port = 47893
+            }
+
+            var localAddresses: List<String>? = localAddrs
+            var reserved: List<Int>? = reservedList
+            var wireguardMtu = if (sObj.has("wireguardMtu")) sObj.getInt("wireguardMtu") else null
+
+            if (protocol == ProxyProtocol.WIREGUARD) {
+                if (localAddresses.isNullOrEmpty() && (address.contains("cloudflare") || serverName.contains("WARP", ignoreCase = true) || address.startsWith("162.159.") || address.startsWith("188.114."))) {
+                    localAddresses = listOf("172.16.0.2/32", "2606:4700:110:8::1/128")
+                }
+                if (reserved.isNullOrEmpty() && (address.contains("cloudflare") || serverName.contains("WARP", ignoreCase = true) || address.startsWith("162.159.") || address.startsWith("188.114."))) {
+                    reserved = listOf(0, 0, 0)
+                }
+                if (wireguardMtu == null && (address.contains("cloudflare") || serverName.contains("WARP", ignoreCase = true))) {
+                    wireguardMtu = 1280
+                }
+            }
+
             return ProxyServerConfig(
                 id = sObj.optString("id", UUID.randomUUID().toString()),
-                name = sObj.optString("name", "Unknown Server"),
+                name = serverName,
                 protocol = protocol,
-                address = sObj.optString("address", "127.0.0.1"),
-                port = sObj.optInt("port", 443),
+                address = address,
+                port = port,
                 uuid = sObj.optString("uuid").takeIf { it.isNotEmpty() },
                 password = sObj.optString("password").takeIf { it.isNotEmpty() },
                 method = sObj.optString("method").takeIf { it.isNotEmpty() },
+                plugin = sObj.optString("plugin").takeIf { it.isNotEmpty() },
+                pluginOpts = sObj.optString("pluginOpts").takeIf { it.isNotEmpty() },
+                prefix = sObj.optString("prefix").takeIf { it.isNotEmpty() },
+                isOutline = sObj.optBoolean("isOutline", false),
                 security = sObj.optString("security").takeIf { it.isNotEmpty() },
                 alterId = sObj.optInt("alterId", 0),
                 flow = sObj.optString("flow").takeIf { it.isNotEmpty() },
@@ -223,6 +287,9 @@ data class ProxyServerConfig(
                 privateKey = sObj.optString("privateKey").takeIf { it.isNotEmpty() },
                 peerPublicKey = sObj.optString("peerPublicKey").takeIf { it.isNotEmpty() },
                 preSharedKey = sObj.optString("preSharedKey").takeIf { it.isNotEmpty() },
+                localAddresses = localAddresses,
+                reserved = reserved,
+                wireguardMtu = wireguardMtu,
                 openfluxTransport = sObj.optString("openfluxTransport").takeIf { it.isNotEmpty() },
                 openfluxDocUrl = sObj.optString("openfluxDocUrl").takeIf { it.isNotEmpty() },
                 openfluxToken = sObj.optString("openfluxToken").takeIf { it.isNotEmpty() },
@@ -252,6 +319,7 @@ enum class ProxyProtocol(val displayName: String, val uriScheme: String) {
     SOCKS5("SOCKS5", "socks5"),
     HTTP("HTTP", "http"),
     OPENFLUX("OpenFlux", "openflux"),
+    MASQUE("MASQUE", "masque"),
 }
 
 /**

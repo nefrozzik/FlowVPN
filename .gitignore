@@ -20,4 +20,9 @@ vpn/build/
 *.apk
 *.aab
 *.log
+*.zip
+flowvpn_logs_*.txt
+outbound_temp.go
+tools/
+release_apk_*/
 vpn/libs/libbox.aar

@@ -38,34 +38,70 @@ class AppContainer(context: Context) {
         private const val KEY_SERVER_JSON = "selected_server_json"
         private const val KEY_SERVER_ID = "selected_server_id"
         private const val KEY_COUNTRY = "selected_country"
+        private const val KEY_FAVORITE_SERVERS = "favorite_server_ids"
     }
 
     private val _selectedServer = MutableStateFlow<ProxyServerConfig?>(null)
     val selectedServer: StateFlow<ProxyServerConfig?> = _selectedServer.asStateFlow()
 
+    private val _favoriteServerIds = MutableStateFlow<Set<String>>(emptySet())
+    val favoriteServerIds: StateFlow<Set<String>> = _favoriteServerIds.asStateFlow()
+
     init {
-        // Восстановление выбранного сервера из постоянного хранилища при запуске приложения
         try {
+            val savedFavs = prefs.getStringSet(KEY_FAVORITE_SERVERS, null)
+            if (savedFavs != null) {
+                _favoriteServerIds.value = savedFavs
+            }
+
             val jsonStr = prefs.getString(KEY_SERVER_JSON, null)
-            if (!jsonStr.isNullOrBlank()) {
+            val restored = if (!jsonStr.isNullOrBlank()) {
                 val json = org.json.JSONObject(jsonStr)
-                val restored = ProxyServerConfig.fromJson(json)
-                _selectedServer.value = restored
-                com.flowvpn.core.state.VpnStateManager.currentServerName = restored.name
-                com.flowvpn.core.state.VpnStateManager.activeServerConfig = restored
-                timber.log.Timber.i("AppContainer: Восстановлен сохраненный сервер из SharedPreferences: ${restored.name} (${restored.country})")
+                ProxyServerConfig.fromJson(json).also {
+                    timber.log.Timber.i("AppContainer: Восстановлен сохраненный сервер из SharedPreferences: ${it.name} (${it.country})")
+                }
             } else if (selectedServerFile.exists()) {
                 val json = org.json.JSONObject(selectedServerFile.readText())
-                val restored = ProxyServerConfig.fromJson(json)
+                ProxyServerConfig.fromJson(json).also {
+                    timber.log.Timber.i("AppContainer: Восстановлен сохраненный сервер: ${it.name} (${it.country})")
+                }
+            } else null
+
+            if (restored != null) {
                 _selectedServer.value = restored
                 com.flowvpn.core.state.VpnStateManager.currentServerName = restored.name
                 com.flowvpn.core.state.VpnStateManager.activeServerConfig = restored
-                timber.log.Timber.i("AppContainer: Восстановлен сохраненный сервер: ${restored.name} (${restored.country})")
+                try {
+                    prefs.edit().apply {
+                        putString(KEY_SERVER_JSON, restored.toJson().toString())
+                        putString(KEY_SERVER_ID, restored.id)
+                        putString(KEY_COUNTRY, restored.country ?: "")
+                        apply()
+                    }
+                    selectedServerFile.writeText(restored.toJson().toString(2))
+                } catch (_: Exception) {}
             }
         } catch (e: Exception) {
             timber.log.Timber.w(e, "AppContainer: Ошибка восстановления сохраненного сервера")
         }
     }
+
+    fun toggleFavorite(serverId: String) {
+        val current = _favoriteServerIds.value.toMutableSet()
+        if (current.contains(serverId)) {
+            current.remove(serverId)
+        } else {
+            current.add(serverId)
+        }
+        _favoriteServerIds.value = current
+        try {
+            prefs.edit().putStringSet(KEY_FAVORITE_SERVERS, current).apply()
+        } catch (e: Exception) {
+            timber.log.Timber.w(e, "AppContainer: Ошибка сохранения избранных серверов")
+        }
+    }
+
+    fun isFavorite(serverId: String): Boolean = _favoriteServerIds.value.contains(serverId)
 
     fun selectServer(server: ProxyServerConfig?) {
         _selectedServer.value = server
@@ -89,7 +125,12 @@ class AppContainer(context: Context) {
             com.flowvpn.core.state.VpnStateManager.currentServerName = null
             com.flowvpn.core.state.VpnStateManager.activeServerConfig = null
             try {
-                prefs.edit().clear().apply()
+                prefs.edit().apply {
+                    remove(KEY_SERVER_JSON)
+                    remove(KEY_SERVER_ID)
+                    remove(KEY_COUNTRY)
+                    apply()
+                }
                 if (selectedServerFile.exists()) selectedServerFile.delete()
                 if (selectedServerIdFile.exists()) selectedServerIdFile.delete()
                 if (selectedCountryFile.exists()) selectedCountryFile.delete()

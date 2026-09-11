@@ -98,6 +98,7 @@ fun SettingsScreen(
     var showUpdateIntervalDialog by remember { mutableStateOf(false) }
     var showBypassDomainsDialog by remember { mutableStateOf(false) }
     var showOpenFluxDialog by remember { mutableStateOf(false) }
+    var showWarpDialog by remember { mutableStateOf(false) }
     var isManualUpdating by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -164,6 +165,22 @@ fun SettingsScreen(
                     title = "Обход «белых списков» (OpenFlux)",
                     subtitle = "Скрытый туннель через Яндекс Документы и MAX при блокировках",
                     onClick = { showOpenFluxDialog = true }
+                )
+            }
+
+            // Разблокировщик Cloudflare WARP (Цепочка VPN ➔ WARP)
+            item {
+                val warpSubtitle = if (settings.enableWarpChaining) {
+                    val accType = if (settings.warpAccountType == "warp_plus") "WARP+" else "Бесплатный"
+                    "Включено ($accType). Трафик направляется VPN ➔ Cloudflare WARP"
+                } else {
+                    "Выключено. Нажмите для настройки цепочки VPN ➔ Cloudflare WARP"
+                }
+                SettingsClickableCard(
+                    icon = Icons.Default.Public,
+                    title = "Cloudflare WARP (Разблокировщик)",
+                    subtitle = warpSubtitle,
+                    onClick = { showWarpDialog = true }
                 )
             }
 
@@ -468,18 +485,29 @@ fun SettingsScreen(
                                 tint = MaterialTheme.colorScheme.primary
                             )
                             Spacer(modifier = Modifier.width(12.dp))
-                            Text(
-                                text = "FlowVPN Client v${com.flowvpn.app.BuildConfig.VERSION_NAME}",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Column {
+                                Text(
+                                    text = "FlowVPN Client v${com.flowvpn.app.BuildConfig.VERSION_NAME}",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Release v${com.flowvpn.app.BuildConfig.VERSION_NAME} • sing-box 1.14+",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
                         }
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "Версия: ${com.flowvpn.app.BuildConfig.VERSION_NAME} (Публичная бета)\nЯдро: sing-box (libbox) v1.14+\nСтек: Android TUN API 26-35, Material Design 3\nПротоколы: VLESS Reality, VMess, Trojan, Hysteria 2, WireGuard, ShadowSocks\nФункции: Обход РФ, Per-App Split Tunneling, DoH, FakeDNS, Doze Mode",
+                            text = "• Ядро: sing-box (libbox) v1.14.0 (gVisor TUN stack)\n" +
+                                "• Платформа: Android API 26-35, Jetpack Compose Material 3\n" +
+                                "• Протоколы: VLESS (Reality, XTLS-Vision), Hysteria 2 (QUIC / Brutal CC), WireGuard, Cloudflare MASQUE (HTTP/2 и HTTP/3), Shadowsocks (вкл. Outline с dynamic prefix & ssconf://), Trojan, VMess, TUIC, SOCKS5\n" +
+                                "• Cloudflare WARP: Разблокировщик сайтов (Цепочка VPN ➔ WARP / Автономный режим), генерация ключей X25519, встроенный Anycast IP сканер чистых эндпоинтов\n" +
+                                "• Обход цензуры и DPI: Прямой доступ к сервисам РФ (.ru, банки, Госуслуги), Per-App Split Tunneling, FakeDNS, DoH (Cloudflare, Google, AdGuard, Quad9, Custom), обход блокировок ТСПУ, TLS Fragmentation, Kill Switch",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                            lineHeight = 18.sp
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.9f),
+                            lineHeight = 20.sp
                         )
                     }
                 }
@@ -917,6 +945,36 @@ fun SettingsScreen(
                     } catch (_: Exception) {
                         false
                     }
+                }
+            }
+        )
+    }
+
+    if (showWarpDialog) {
+        WarpSettingsDialog(
+            onDismiss = { showWarpDialog = false },
+            settings = settings,
+            onSaveSettings = { enableChaining, licenseKey, warpConfig, warpMode ->
+                scope.launch {
+                    settingsRepo.setWarpSettings(
+                        enabled = enableChaining,
+                        licenseKey = licenseKey,
+                        accountType = warpConfig?.accountType ?: "free",
+                        configJson = warpConfig?.toJson(),
+                        warpMode = warpMode
+                    )
+                    val msg = if (enableChaining) {
+                        "Цепочка VPN ➔ WARP активирована"
+                    } else {
+                        "Настройки Cloudflare WARP сохранены"
+                    }
+                    snackbarHostState.showSnackbar(msg)
+                }
+            },
+            onAddServer = { proxyServer ->
+                scope.launch {
+                    container.subscriptionRepository.addServer(proxyServer)
+                    snackbarHostState.showSnackbar("Сервер «${proxyServer.name}» добавлен в список")
                 }
             }
         )

@@ -9,7 +9,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.getSystemService
-import com.hiddify.core.libbox.InterfaceUpdateListener
+import io.nekohasekai.libbox.InterfaceUpdateListener
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob

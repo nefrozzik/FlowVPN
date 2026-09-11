@@ -46,7 +46,13 @@ import com.flowvpn.core.model.ProxyServerConfig
 object ShadowsocksParser {
 
     fun parse(link: String): ProxyServerConfig? {
-        val withoutScheme = link.removePrefix("ss://").removePrefix("SS://")
+        var cleanLink = link.trim()
+        if (cleanLink.startsWith("outline://", ignoreCase = true)) {
+            cleanLink = cleanLink.substring(10).trim()
+        } else if (cleanLink.startsWith("outline-vpn://", ignoreCase = true)) {
+            cleanLink = cleanLink.substring(14).trim()
+        }
+        val withoutScheme = cleanLink.removePrefix("ss://").removePrefix("SS://")
 
         // Извлекаем fragment (имя)
         val name = UriParseUtils.extractFragment(link)
@@ -76,7 +82,7 @@ object ShadowsocksParser {
         if (atIndex < 0) return null
 
         val userinfo = input.substring(0, atIndex)
-        val hostPort = input.substring(atIndex + 1).substringBefore('?')
+        val hostPort = input.substring(atIndex + 1).substringBefore('?').substringBefore('#').trimEnd('/')
         val (host, port) = UriParseUtils.extractHostPort(hostPort)
 
         // Пытаемся определить, закодирован ли userinfo в Base64
@@ -84,13 +90,22 @@ object ShadowsocksParser {
         val colonIndex = decoded.indexOf(':')
         if (colonIndex < 0) return null
 
-        val method = decoded.substring(0, colonIndex)
-        val password = decoded.substring(colonIndex + 1)
+        val rawMethod = decoded.substring(0, colonIndex)
+        val rawPassword = decoded.substring(colonIndex + 1)
+        val method = normalizeMethod(rawMethod)
+        val password = decodePassword(rawPassword)
+        if (method.isBlank() || password.isBlank()) return null
 
         val displayName = name.ifBlank { "$host:$port" }
 
-        // Парсим plugin параметры из query string (SIP003)
+        // Парсим параметры из query string (SIP003 + Outline)
         val params = UriParseUtils.extractQueryParams("?${input.substringAfter('?', "")}")
+        val plugin = params["plugin"]
+        val pluginOpts = params["plugin-opts"] ?: params["plugin_opts"]
+        val prefix = params["prefix"]?.let {
+            UriParseUtils.safePercentDecode(it)
+        }
+        val isOutline = params["outline"] == "1" || prefix != null || input.contains("outline", ignoreCase = true) || name.contains("outline", ignoreCase = true)
 
         return ProxyServerConfig(
             name = displayName,
@@ -99,6 +114,10 @@ object ShadowsocksParser {
             port = port,
             method = method,
             password = password,
+            plugin = plugin,
+            pluginOpts = pluginOpts,
+            prefix = prefix,
+            isOutline = isOutline,
         )
     }
 
@@ -124,11 +143,14 @@ object ShadowsocksParser {
         val colonIndex = methodPassword.indexOf(':')
         if (colonIndex < 0) return null
 
-        val method = methodPassword.substring(0, colonIndex)
-        val password = methodPassword.substring(colonIndex + 1)
+        val method = normalizeMethod(methodPassword.substring(0, colonIndex))
+        val password = decodePassword(methodPassword.substring(colonIndex + 1))
+        if (method.isBlank() || password.isBlank()) return null
+
         val (host, port) = UriParseUtils.extractHostPort(hostPort)
 
         val displayName = name.ifBlank { "$host:$port" }
+        val isOutline = decoded.contains("outline", ignoreCase = true) || name.contains("outline", ignoreCase = true)
 
         return ProxyServerConfig(
             name = displayName,
@@ -137,6 +159,7 @@ object ShadowsocksParser {
             port = port,
             method = method,
             password = password,
+            isOutline = isOutline,
         )
     }
 
@@ -144,14 +167,31 @@ object ShadowsocksParser {
      * Декодировать userinfo — пробуем Base64, если не получается — plaintext.
      */
     private fun decodeUserinfo(userinfo: String): String {
+        val clean = UriParseUtils.safePercentDecode(userinfo)
+
         // Если содержит ':', вероятно это plaintext method:password
-        if (userinfo.contains(':')) return userinfo
+        if (clean.contains(':')) return clean
 
         // Иначе пробуем Base64
         return try {
-            UriParseUtils.decodeBase64(userinfo)
+            UriParseUtils.decodeBase64(clean)
         } catch (_: Exception) {
-            userinfo
+            clean
         }
+    }
+
+    private fun normalizeMethod(method: String): String {
+        val lower = method.trim().lowercase()
+        return when (lower) {
+            "chacha20-poly1305", "aead_chacha20_poly1305" -> "chacha20-ietf-poly1305"
+            "aead_aes_256_gcm" -> "aes-256-gcm"
+            "aead_aes_128_gcm" -> "aes-128-gcm"
+            "aead_aes_192_gcm" -> "aes-192-gcm"
+            else -> lower
+        }
+    }
+
+    private fun decodePassword(password: String): String {
+        return UriParseUtils.safePercentDecode(password)
     }
 }

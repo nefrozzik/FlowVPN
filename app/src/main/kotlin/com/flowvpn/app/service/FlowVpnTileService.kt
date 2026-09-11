@@ -105,12 +105,39 @@ class FlowVpnTileService : TileService() {
                 listOf(packageName)
             }
 
+            val settings = app.container.settingsRepository.settings.value
+
+            val isWarpServer = server.id.startsWith("warp-") ||
+                    server.protocol == com.flowvpn.core.model.ProxyProtocol.MASQUE ||
+                    (server.protocol == com.flowvpn.core.model.ProxyProtocol.WIREGUARD &&
+                            (server.name.contains("WARP", ignoreCase = true) || server.address.startsWith("162.159.") || server.address.startsWith("188.114.")))
+
+            val underlyingProxy = if (isWarpServer && settings.enableWarpChaining) {
+                app.container.subscriptionRepository.getCachedSubscriptions()
+                    .flatMap { it.servers }
+                    .firstOrNull { candidate ->
+                        candidate.id != server.id &&
+                        candidate.protocol != com.flowvpn.core.model.ProxyProtocol.WIREGUARD &&
+                        candidate.protocol != com.flowvpn.core.model.ProxyProtocol.MASQUE &&
+                        (settings.warpMode != com.flowvpn.core.model.WarpMode.WIREGUARD || (!candidate.isOutline && candidate.prefix.isNullOrBlank()))
+                    }
+            } else null
+
+            val configDir = app.getConfigDirectory()
+            val underlyingFile = File(configDir, "underlying_proxy.json")
+            if (underlyingProxy != null) {
+                underlyingFile.writeText(underlyingProxy.toJson().toString(2))
+            } else {
+                if (underlyingFile.exists()) underlyingFile.delete()
+            }
+
             val configJson = SingBoxConfigBuilder.build(
                 config = server,
+                settings = settings,
                 enabledApps = enabledApps,
-                excludedApps = excludedApps
+                excludedApps = excludedApps,
+                underlyingProxy = underlyingProxy,
             )
-            val configDir = app.getConfigDirectory()
             val configFile = File(configDir, "config.json")
             configDir.mkdirs()
             configFile.writeText(configJson)

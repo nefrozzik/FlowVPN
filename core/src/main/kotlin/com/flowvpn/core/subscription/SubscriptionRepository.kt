@@ -19,6 +19,11 @@ interface SubscriptionRepository {
     fun getAllSubscriptions(): Flow<List<SubscriptionInfo>>
 
     /**
+     * Получить текущие кэшированные подписки синхронно.
+     */
+    fun getCachedSubscriptions(): List<SubscriptionInfo> = emptyList()
+
+    /**
      * Получить подписку по ID.
      */
     suspend fun getSubscription(id: String): SubscriptionInfo?
@@ -69,4 +74,20 @@ interface SubscriptionRepository {
      * @return true при успехе
      */
     suspend fun addServer(server: ProxyServerConfig): Boolean
+
+    /**
+     * Удалить отдельный сервер по его ID из подписки (или ручного импорта).
+     *
+     * @param serverId ID сервера
+     * @return true, если сервер был найден и удален
+     */
+    suspend fun deleteServer(serverId: String): Boolean
+
+    /**
+     * Обновить конфигурацию существующего сервера (редактирование параметров).
+     *
+     * @param server обновленная конфигурация сервера (с тем же ID)
+     * @return true, если сервер был найден и обновлен
+     */
+    suspend fun updateServer(server: ProxyServerConfig): Boolean
 }

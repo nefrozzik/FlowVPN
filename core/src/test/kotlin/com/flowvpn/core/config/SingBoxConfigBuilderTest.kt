@@ -54,9 +54,13 @@ class SingBoxConfigBuilderTest {
         assertEquals("gvisor", tun["stack"])
         assertEquals(true, tun["auto_route"])
         assertEquals(false, tun["strict_route"])
-        assertEquals(true, tun["sniff"])
-        assertEquals(true, tun["sniff_override_destination"])
-        assertEquals(1500.0, (tun["mtu"] as Number).toDouble(), 0.001)
+        assertFalse(tun.containsKey("sniff"))
+        assertFalse(tun.containsKey("sniff_override_destination"))
+        assertEquals(1400.0, (tun["mtu"] as Number).toDouble(), 0.001)
+
+        val outbounds = root["outbounds"] as List<Map<String, Any>>
+        val vlessOutbound = outbounds.find { it["tag"] == "proxy" }
+        assertEquals("xudp", vlessOutbound?.get("packet_encoding"))
     }
 
     @Test
@@ -150,6 +154,7 @@ class SingBoxConfigBuilderTest {
         val rootDomain = parseJson(jsonDomain)
         val rulesDomain = (rootDomain["route"] as Map<String, Any>)["rules"] as List<Map<String, Any>>
 
+        var foundSniffAction = false
         var foundDnsProtoOut = false
         var foundDnsPortOut = false
         var foundProxyDomainDirect = false
@@ -159,16 +164,19 @@ class SingBoxConfigBuilderTest {
         var foundQuicBlock = false
 
         for (rule in rulesDomain) {
-            if (rule["protocol"] == "dns" && rule["outbound"] == "dns-out") {
+            if (rule["action"] == "sniff") {
+                foundSniffAction = true
+            }
+            if (rule["protocol"] == "dns" && rule["action"] == "hijack-dns") {
                 foundDnsProtoOut = true
             }
-            if ((rule["port"] as? List<*>)?.firstOrNull() == 53.0 && rule["outbound"] == "dns-out") {
+            if ((rule["port"] as? List<*>)?.firstOrNull() == 53.0 && rule["action"] == "hijack-dns") {
                 foundDnsPortOut = true
             }
-            if ((rule["port"] as? List<*>)?.firstOrNull() == 853.0 && rule["outbound"] == "block") {
+            if ((rule["port"] as? List<*>)?.firstOrNull() == 853.0 && rule["action"] == "reject") {
                 foundPort853Block = true
             }
-            if ((rule["port"] as? List<*>)?.firstOrNull() == 443.0 && rule["network"] == "udp" && rule["outbound"] == "block") {
+            if ((rule["port"] as? List<*>)?.firstOrNull() == 443.0 && rule["network"] == "udp" && rule["action"] == "reject") {
                 foundQuicBlock = true
             }
             if ((rule["domain"] as? List<*>)?.firstOrNull() == "vpn.flowvpn.example.com" &&
@@ -180,10 +188,11 @@ class SingBoxConfigBuilderTest {
             }
         }
 
-        assertTrue("DNS protocol routed to dns-out", foundDnsProtoOut)
-        assertTrue("Port 53 routed to dns-out", foundDnsPortOut)
-        assertTrue("Port 853 routed to block", foundPort853Block)
-        assertTrue("QUIC UDP 443 routed to block", foundQuicBlock)
+        assertTrue("Sniff action rule must be present", foundSniffAction)
+        assertTrue("DNS protocol routed to hijack-dns", foundDnsProtoOut)
+        assertTrue("Port 53 routed to hijack-dns", foundDnsPortOut)
+        assertTrue("Port 853 rejected", foundPort853Block)
+        assertTrue("QUIC UDP 443 rejected", foundQuicBlock)
         assertTrue("Proxy domain routed to direct", foundProxyDomainDirect)
         assertTrue("Bypass LAN ip_is_private routed to direct", foundBypassLan)
 
@@ -199,5 +208,185 @@ class SingBoxConfigBuilderTest {
             }
         }
         assertTrue("Proxy IP routed to direct", foundProxyIpDirect)
+    }
+
+    @Test
+    @Suppress("UNCHECKED_CAST")
+    fun testWarpChainingOutboundAndRoute() {
+        val warp = com.flowvpn.core.model.WarpConfig(
+            accountId = "test-warp-acc",
+            accessToken = "token123",
+            accountType = "warp_plus",
+            privateKey = "priv123",
+            peerPublicKey = "pub123",
+            warpMode = com.flowvpn.core.model.WarpMode.WIREGUARD
+        )
+        val settings = AppSettings(
+            enableWarpChaining = true,
+            warpConfigJson = warp.toJson(),
+            warpMode = com.flowvpn.core.model.WarpMode.WIREGUARD
+        )
+
+        val jsonString = SingBoxConfigBuilder.build(sampleConfigWithDomain, settings)
+        val root = parseJson(jsonString)
+
+        val endpoints = root["endpoints"] as? List<Map<String, Any>>
+        val outbounds = root["outbounds"] as List<Map<String, Any>>
+        val warpItem = endpoints?.find { it["tag"] == "warp" } ?: outbounds.find { it["tag"] == "warp" }
+        assertTrue("Warp outbound/endpoint must be present", warpItem != null)
+        assertEquals("wireguard", warpItem!!["type"])
+        assertEquals("proxy", warpItem["detour"])
+
+        val route = root["route"] as Map<String, Any>
+        assertEquals("warp", route["final"])
+
+        val dns = root["dns"] as Map<String, Any>
+        val dnsServers = dns["servers"] as List<Map<String, Any>>
+        val remoteDns = dnsServers.find { it["tag"] == "remote-dns" }
+        assertEquals("warp", remoteDns!!["detour"])
+    }
+
+    @Test
+    @Suppress("UNCHECKED_CAST")
+    fun testWarpStandaloneWhenChainingDisabled() {
+        val warpServer = ProxyServerConfig(
+            id = "warp-test-acc",
+            name = "Cloudflare WARP",
+            address = "162.159.192.1",
+            port = 2408,
+            protocol = ProxyProtocol.WIREGUARD,
+            privateKey = "privKey123",
+            peerPublicKey = "pubKey123",
+            localAddresses = listOf("172.16.0.2/32", "2606:4700:110:8::1/128"),
+            reserved = listOf(1, 2, 3),
+        )
+        val settings = AppSettings(enableWarpChaining = false)
+
+        val jsonString = SingBoxConfigBuilder.build(warpServer, settings, underlyingProxy = null)
+        val root = parseJson(jsonString)
+
+        val outbounds = root["outbounds"] as List<Map<String, Any>>
+        val proxyOutbound = outbounds.find { it["tag"] == "proxy" }
+        assertTrue("Proxy outbound must be present", proxyOutbound != null)
+        assertEquals("wireguard", proxyOutbound!!["type"])
+        assertEquals("162.159.192.1", proxyOutbound["server"])
+        assertFalse("Standalone WARP must NOT have detour", proxyOutbound.containsKey("detour"))
+
+        val warpOutbound = outbounds.find { it["tag"] == "warp" }
+        assertTrue("Standalone WARP must NOT have separate warp outbound", warpOutbound == null)
+
+        val route = root["route"] as Map<String, Any>
+        assertEquals("proxy", route["final"])
+    }
+
+    @Test
+    @Suppress("UNCHECKED_CAST")
+    fun testWarpChainingWithUnderlyingProxyWhenEnabled() {
+        val warpServer = ProxyServerConfig(
+            id = "warp-test-acc",
+            name = "Cloudflare WARP",
+            address = "162.159.192.1",
+            port = 2408,
+            protocol = ProxyProtocol.WIREGUARD,
+            privateKey = "privKey123",
+            peerPublicKey = "pubKey123",
+        )
+        val settings = AppSettings(enableWarpChaining = true, warpMode = com.flowvpn.core.model.WarpMode.WIREGUARD)
+
+        val jsonString = SingBoxConfigBuilder.build(
+            config = warpServer,
+            settings = settings,
+            underlyingProxy = sampleConfigWithDomain
+        )
+        val root = parseJson(jsonString)
+
+        val outbounds = root["outbounds"] as List<Map<String, Any>>
+        val primaryOutbound = outbounds.find { it["tag"] == "proxy" }
+        assertTrue("Primary outbound must be underlying proxy", primaryOutbound != null)
+        assertEquals("vless", primaryOutbound!!["type"])
+
+        val endpoints = root["endpoints"] as? List<Map<String, Any>>
+        val warpOutbound = endpoints?.find { it["tag"] == "warp" } ?: outbounds.find { it["tag"] == "warp" }
+        assertTrue("Warp outbound must be present when chained", warpOutbound != null)
+        assertEquals("wireguard", warpOutbound!!["type"])
+        assertEquals("proxy", warpOutbound["detour"])
+
+        val route = root["route"] as Map<String, Any>
+        assertEquals("warp", route["final"])
+    }
+
+    @Test
+    @Suppress("UNCHECKED_CAST")
+    fun testWarpChainingMasqueH2() {
+        val warp = com.flowvpn.core.model.WarpConfig(
+            accountId = "test-warp-acc",
+            accessToken = "token123",
+            accountType = "warp_plus",
+            privateKey = "priv123",
+            peerPublicKey = "pub123",
+            endpointHost = "162.159.192.1",
+            endpointPort = 443,
+            warpMode = com.flowvpn.core.model.WarpMode.MASQUE_H2
+        )
+        val settings = AppSettings(
+            enableWarpChaining = true,
+            warpConfigJson = warp.toJson(),
+            warpMode = com.flowvpn.core.model.WarpMode.MASQUE_H2
+        )
+
+        val jsonString = SingBoxConfigBuilder.build(sampleConfigWithDomain, settings)
+        val root = parseJson(jsonString)
+
+        val outbounds = root["outbounds"] as List<Map<String, Any>>
+        val warpOutbound = outbounds.find { it["tag"] == "warp" }
+        assertTrue("Warp outbound must be present", warpOutbound != null)
+        assertEquals("masque", warpOutbound!!["type"])
+        assertEquals(true, warpOutbound["use_http2"])
+        assertEquals("proxy", warpOutbound["detour"])
+        assertEquals("162.159.198.2", warpOutbound["address"])
+
+        val profile = warpOutbound["profile"] as Map<String, Any>
+        assertEquals("proxy", profile["detour"])
+        assertFalse(profile.containsKey("id"))
+        assertFalse(profile.containsKey("auth_token"))
+
+        val tls = warpOutbound["tls"] as Map<String, Any>
+        assertEquals("consumer-masque.cloudflareclient.com", tls["server_name"])
+        assertEquals(true, tls["insecure"])
+        assertEquals(true, tls["fragment"])
+        assertEquals(true, tls["record_fragment"])
+    }
+
+    @Test
+    @Suppress("UNCHECKED_CAST")
+    fun testStandaloneMasqueServer() {
+        val masqueServer = ProxyServerConfig(
+            id = "masque-test-node",
+            name = "Cloudflare MASQUE",
+            address = "162.159.192.1",
+            port = 443,
+            protocol = ProxyProtocol.MASQUE,
+        )
+        val settings = AppSettings(
+            enableWarpChaining = false,
+            warpMode = com.flowvpn.core.model.WarpMode.MASQUE_H2
+        )
+
+        val jsonString = SingBoxConfigBuilder.build(masqueServer, settings, underlyingProxy = null)
+        val root = parseJson(jsonString)
+
+        val outbounds = root["outbounds"] as List<Map<String, Any>>
+        val proxyOutbound = outbounds.find { it["tag"] == "proxy" }
+        assertTrue("Proxy outbound must be present", proxyOutbound != null)
+        assertEquals("masque", proxyOutbound!!["type"])
+        assertEquals("162.159.198.2", proxyOutbound["address"])
+        assertEquals(443, (proxyOutbound["port"] as Number).toInt())
+        assertEquals(true, proxyOutbound["use_http2"])
+
+        val tls = proxyOutbound["tls"] as Map<String, Any>
+        assertEquals("consumer-masque.cloudflareclient.com", tls["server_name"])
+        assertEquals(true, tls["insecure"])
+        assertEquals(true, tls["fragment"])
+        assertEquals(true, tls["record_fragment"])
     }
 }

@@ -5,8 +5,8 @@ import android.os.Build
 import android.os.CancellationSignal
 import android.system.ErrnoException
 import androidx.annotation.RequiresApi
-import com.hiddify.core.libbox.ExchangeContext
-import com.hiddify.core.libbox.LocalDNSTransport
+import io.nekohasekai.libbox.ExchangeContext
+import io.nekohasekai.libbox.LocalDNSTransport
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.runBlocking

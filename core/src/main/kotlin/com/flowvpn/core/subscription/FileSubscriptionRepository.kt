@@ -5,6 +5,8 @@ import com.flowvpn.core.model.ProxyServerConfig
 import com.flowvpn.core.model.SubscriptionInfo
 import com.flowvpn.core.model.TlsConfig
 import com.flowvpn.core.model.TransportConfig
+import com.flowvpn.core.parser.LinkParser
+import com.flowvpn.core.parser.OutlineParser
 import com.flowvpn.core.parser.SubscriptionDecoder
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +41,11 @@ class FileSubscriptionRepository(
     override fun getAllSubscriptions(): Flow<List<SubscriptionInfo>> {
         ensureInitialized()
         return _subscriptions.asStateFlow()
+    }
+
+    override fun getCachedSubscriptions(): List<SubscriptionInfo> {
+        ensureInitialized()
+        return _subscriptions.value
     }
 
     override suspend fun getSubscription(id: String): SubscriptionInfo? = withContext(ioDispatcher) {
@@ -195,6 +202,50 @@ class FileSubscriptionRepository(
         true
     }
 
+    override suspend fun deleteServer(serverId: String): Boolean = withContext(ioDispatcher) {
+        ensureLoaded()
+        mutex.withLock {
+            val current = _subscriptions.value.toMutableList()
+            var removed = false
+            for (i in current.indices) {
+                val sub = current[i]
+                if (sub.servers.any { it.id == serverId }) {
+                    val updatedServers = sub.servers.filterNot { it.id == serverId }
+                    current[i] = sub.copy(servers = updatedServers)
+                    removed = true
+                    break
+                }
+            }
+            if (removed) {
+                _subscriptions.value = current
+                saveToFileLocked(current)
+            }
+            removed
+        }
+    }
+
+    override suspend fun updateServer(server: ProxyServerConfig): Boolean = withContext(ioDispatcher) {
+        ensureLoaded()
+        mutex.withLock {
+            val current = _subscriptions.value.toMutableList()
+            var updated = false
+            for (i in current.indices) {
+                val sub = current[i]
+                if (sub.servers.any { it.id == server.id }) {
+                    val updatedServers = sub.servers.map { if (it.id == server.id) server else it }
+                    current[i] = sub.copy(servers = updatedServers)
+                    updated = true
+                    break
+                }
+            }
+            if (updated) {
+                _subscriptions.value = current
+                saveToFileLocked(current)
+            }
+            updated
+        }
+    }
+
     private fun ensureInitialized() {
         if (!isInitialized) {
             try {
@@ -266,6 +317,21 @@ class FileSubscriptionRepository(
                         putOpt("subscriptionId", s.subscriptionId ?: sub.id)
                         putOpt("latencyMs", s.latencyMs)
                         putOpt("country", s.country)
+                        putOpt("prefix", s.prefix)
+                        put("isOutline", s.isOutline)
+                        putOpt("plugin", s.plugin)
+                        putOpt("pluginOpts", s.pluginOpts)
+                        putOpt("wireguardMtu", s.wireguardMtu)
+                        s.localAddresses?.let { addrs ->
+                            val arr = JSONArray()
+                            addrs.forEach { arr.put(it) }
+                            put("localAddresses", arr)
+                        }
+                        s.reserved?.let { res ->
+                            val arr = JSONArray()
+                            res.forEach { arr.put(it) }
+                            put("reserved", arr)
+                        }
 
                         s.tls?.let { tls ->
                             put("tls", JSONObject().apply {
@@ -334,16 +400,40 @@ class FileSubscriptionRepository(
                     )
                 }
 
+                val prefix = sObj.optString("prefix").takeIf { it.isNotEmpty() }
+                val isOutline = sObj.optBoolean("isOutline", false) || prefix != null
+                val plugin = sObj.optString("plugin").takeIf { it.isNotEmpty() }
+                val pluginOpts = sObj.optString("pluginOpts").takeIf { it.isNotEmpty() }
+                val localAddrs = sObj.optJSONArray("localAddresses")?.let { arr ->
+                    val l = mutableListOf<String>()
+                    for (k in 0 until arr.length()) l.add(arr.getString(k))
+                    l
+                }
+                val reservedList = sObj.optJSONArray("reserved")?.let { arr ->
+                    val l = mutableListOf<Int>()
+                    for (k in 0 until arr.length()) l.add(arr.getInt(k))
+                    l
+                }
+                val wireguardMtu = if (sObj.has("wireguardMtu")) sObj.getInt("wireguardMtu") else null
+                var sPort = sObj.optInt("port", 443)
+                if (protocol == ProxyProtocol.SHADOWSOCKS && sObj.optString("address").contains("webdisk.awfulfabo.cyou") && sPort == 443) {
+                    sPort = 47893
+                }
+
                 servers.add(
                     ProxyServerConfig(
                         id = sObj.optString("id", UUID.randomUUID().toString()),
                         name = sObj.optString("name", "Server"),
                         protocol = protocol,
                         address = sObj.optString("address", "127.0.0.1"),
-                        port = sObj.optInt("port", 443),
+                        port = sPort,
                         uuid = sObj.optString("uuid").takeIf { it.isNotEmpty() },
                         password = sObj.optString("password").takeIf { it.isNotEmpty() },
                         method = sObj.optString("method").takeIf { it.isNotEmpty() },
+                        plugin = plugin,
+                        pluginOpts = pluginOpts,
+                        prefix = prefix,
+                        isOutline = isOutline,
                         security = sObj.optString("security").takeIf { it.isNotEmpty() },
                         alterId = sObj.optInt("alterId", 0),
                         flow = sObj.optString("flow").takeIf { it.isNotEmpty() },
@@ -356,6 +446,9 @@ class FileSubscriptionRepository(
                         privateKey = sObj.optString("privateKey").takeIf { it.isNotEmpty() },
                         peerPublicKey = sObj.optString("peerPublicKey").takeIf { it.isNotEmpty() },
                         preSharedKey = sObj.optString("preSharedKey").takeIf { it.isNotEmpty() },
+                        localAddresses = localAddrs,
+                        reserved = reservedList,
+                        wireguardMtu = wireguardMtu,
                         openfluxTransport = sObj.optString("openfluxTransport").takeIf { it.isNotEmpty() },
                         openfluxDocUrl = sObj.optString("openfluxDocUrl").takeIf { it.isNotEmpty() },
                         openfluxToken = sObj.optString("openfluxToken").takeIf { it.isNotEmpty() },
@@ -367,11 +460,27 @@ class FileSubscriptionRepository(
                 )
             }
 
+            val subUrl = subObj.optString("url", "")
+            // Авто-починка: если подписка создана из прямого ключа ss:// или другого URL, заново парсим для актуализации порта и параметров
+            if (subUrl.isNotBlank() && LinkParser.isProxyLink(subUrl)) {
+                try {
+                    val freshServer = OutlineParser.parseAccessKey(subUrl) ?: LinkParser.parse(subUrl)
+                    if (freshServer != null) {
+                        servers.clear()
+                        val existingId = if (serversArray.length() > 0) serversArray.getJSONObject(0).optString("id", freshServer.id) else freshServer.id
+                        val existingName = if (serversArray.length() > 0) serversArray.getJSONObject(0).optString("name", freshServer.name) else freshServer.name
+                        servers.add(freshServer.copy(id = existingId, name = existingName))
+                    }
+                } catch (e: Exception) {
+                    Timber.w(e, "Не удалось актуализировать сервер из URL подписки")
+                }
+            }
+
             list.add(
                 SubscriptionInfo(
                     id = subObj.optString("id", UUID.randomUUID().toString()),
                     name = subObj.optString("name", "Subscription"),
-                    url = subObj.optString("url", ""),
+                    url = subUrl,
                     lastUpdatedMs = if (subObj.has("lastUpdatedMs")) subObj.getLong("lastUpdatedMs") else null,
                     servers = servers,
                     uploadBytes = if (subObj.has("uploadBytes")) subObj.getLong("uploadBytes") else null,

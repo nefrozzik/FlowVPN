@@ -41,6 +41,9 @@ dependencies {
     // classes.jar & jniLibs — sing-box / hiddify native core
     api(files("libs/classes.jar"))
 
+    // Cryptography for OutlineBridge (ChaCha20-Poly1305, AES-GCM, HKDF, MD5)
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+
     // Testing
     testImplementation(libs.junit)
     testImplementation(libs.mockk)
