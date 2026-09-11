@@ -61,9 +61,9 @@ object SingBoxConfigBuilder {
                         (config.name.contains("WARP", ignoreCase = true) || config.address.startsWith("162.159.") || config.address.startsWith("188.114.")))
 
         val isChainedWarp = (settings.enableWarpChaining && warpConfig != null && !isWarpServer) ||
-                (isWarpServer && settings.enableWarpChaining && underlyingProxy != null)
+                (isWarpServer && underlyingProxy != null)
 
-        val primaryConfig = if (isWarpServer && settings.enableWarpChaining && underlyingProxy != null) underlyingProxy else config
+        val primaryConfig = if (isWarpServer && underlyingProxy != null) underlyingProxy else config
 
         val endpoints = mutableListOf<String>()
         val outbounds = mutableListOf<String>()
@@ -132,13 +132,6 @@ object SingBoxConfigBuilder {
             "log": {
                 "level": "debug",
                 "timestamp": true
-            },
-            "experimental": {
-                "cache_file": {
-                    "enabled": true,
-                    "path": "cache.db",
-                    "store_masque_config": true
-                }
             },
             $dns,
             $endpointsBlock
@@ -255,9 +248,12 @@ object SingBoxConfigBuilder {
         val effectiveAddress = if (config.address.isBlank() || config.address == "0.0.0.0") {
             if (useHttp2) "162.159.198.2" else "162.159.192.1"
         } else config.address
+        val effectivePort = if (config.port > 0) config.port else 443
         if (effectiveAddress.isNotBlank() && effectiveAddress != "0.0.0.0") {
+            parts += """"server": "$effectiveAddress""""
+            parts += """"server_port": $effectivePort"""
             parts += """"address": "$effectiveAddress""""
-            parts += """"port": ${if (config.port > 0) config.port else 443}"""
+            parts += """"port": $effectivePort"""
         }
         val profileParts = mutableListOf<String>()
         warpConfig?.let { warp ->
@@ -276,6 +272,7 @@ object SingBoxConfigBuilder {
         }
         parts += """
             "tls": {
+                "enabled": true,
                 "server_name": "consumer-masque.cloudflareclient.com",
                 "insecure": true,
                 "fragment": true,
@@ -518,9 +515,12 @@ object SingBoxConfigBuilder {
                 val effectiveAddress = if (warp.endpointHost.isBlank() || warp.endpointHost == "0.0.0.0") {
                     if (useHttp2) "162.159.198.2" else "162.159.192.1"
                 } else warp.endpointHost
+                val effectivePort = if (warp.endpointPort > 0) warp.endpointPort else 443
                 if (effectiveAddress.isNotBlank() && effectiveAddress != "0.0.0.0") {
+                    parts += """"server": "$effectiveAddress""""
+                    parts += """"server_port": $effectivePort"""
                     parts += """"address": "$effectiveAddress""""
-                    parts += """"port": ${if (warp.endpointPort > 0) warp.endpointPort else 443}"""
+                    parts += """"port": $effectivePort"""
                 }
                 val profileParts = mutableListOf<String>()
                 profileParts += """"detour": "proxy""""
@@ -536,6 +536,7 @@ object SingBoxConfigBuilder {
                 parts += """"profile": {${profileParts.joinToString(",")}}"""
                 parts += """
                     "tls": {
+                        "enabled": true,
                         "server_name": "consumer-masque.cloudflareclient.com",
                         "insecure": true,
                         "fragment": true,

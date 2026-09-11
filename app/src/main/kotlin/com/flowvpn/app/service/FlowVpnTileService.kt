@@ -112,7 +112,7 @@ class FlowVpnTileService : TileService() {
                     (server.protocol == com.flowvpn.core.model.ProxyProtocol.WIREGUARD &&
                             (server.name.contains("WARP", ignoreCase = true) || server.address.startsWith("162.159.") || server.address.startsWith("188.114.")))
 
-            val underlyingProxy = if (isWarpServer && settings.enableWarpChaining) {
+            val candidateProxy = if (isWarpServer) {
                 app.container.subscriptionRepository.getCachedSubscriptions()
                     .flatMap { it.servers }
                     .firstOrNull { candidate ->
@@ -121,6 +121,10 @@ class FlowVpnTileService : TileService() {
                         candidate.protocol != com.flowvpn.core.model.ProxyProtocol.MASQUE &&
                         (settings.warpMode != com.flowvpn.core.model.WarpMode.WIREGUARD || (!candidate.isOutline && candidate.prefix.isNullOrBlank()))
                     }
+            } else null
+
+            val underlyingProxy = if (isWarpServer && (settings.enableWarpChaining || candidateProxy != null)) {
+                candidateProxy
             } else null
 
             val configDir = app.getConfigDirectory()

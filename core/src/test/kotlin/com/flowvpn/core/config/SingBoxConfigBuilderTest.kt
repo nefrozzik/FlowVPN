@@ -265,14 +265,16 @@ class SingBoxConfigBuilderTest {
         val jsonString = SingBoxConfigBuilder.build(warpServer, settings, underlyingProxy = null)
         val root = parseJson(jsonString)
 
+        val endpoints = root["endpoints"] as? List<Map<String, Any>>
         val outbounds = root["outbounds"] as List<Map<String, Any>>
-        val proxyOutbound = outbounds.find { it["tag"] == "proxy" }
-        assertTrue("Proxy outbound must be present", proxyOutbound != null)
-        assertEquals("wireguard", proxyOutbound!!["type"])
-        assertEquals("162.159.192.1", proxyOutbound["server"])
-        assertFalse("Standalone WARP must NOT have detour", proxyOutbound.containsKey("detour"))
+        val proxyItem = endpoints?.find { it["tag"] == "proxy" } ?: outbounds.find { it["tag"] == "proxy" }
+        assertTrue("Proxy outbound or endpoint must be present", proxyItem != null)
+        assertEquals("wireguard", proxyItem!!["type"])
+        val peerAddress = (proxyItem["peers"] as? List<Map<String, Any>>)?.firstOrNull()?.get("address") ?: proxyItem["server"]
+        assertEquals("162.159.192.1", peerAddress)
+        assertFalse("Standalone WARP must NOT have detour", proxyItem.containsKey("detour"))
 
-        val warpOutbound = outbounds.find { it["tag"] == "warp" }
+        val warpOutbound = endpoints?.find { it["tag"] == "warp" } ?: outbounds.find { it["tag"] == "warp" }
         assertTrue("Standalone WARP must NOT have separate warp outbound", warpOutbound == null)
 
         val route = root["route"] as Map<String, Any>

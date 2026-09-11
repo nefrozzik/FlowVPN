@@ -198,7 +198,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     (server.protocol == com.flowvpn.core.model.ProxyProtocol.WIREGUARD &&
                             (server.name.contains("WARP", ignoreCase = true) || server.address.startsWith("162.159.") || server.address.startsWith("188.114.")))
 
-            val underlyingProxy = if (isWarpServer && settings.enableWarpChaining) {
+            val candidateProxy = if (isWarpServer) {
                 container.subscriptionRepository.getCachedSubscriptions()
                     .flatMap { it.servers }
                     .firstOrNull { candidate ->
@@ -209,19 +209,23 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     }
             } else null
 
+            val underlyingProxy = if (isWarpServer && (settings.enableWarpChaining || candidateProxy != null)) {
+                candidateProxy
+            } else null
+
             val configDir = getApplication<Application>().getConfigDirectory()
             val underlyingFile = File(configDir, "underlying_proxy.json")
             if (underlyingProxy != null) {
                 underlyingFile.writeText(underlyingProxy.toJson().toString(2))
                 com.flowvpn.core.logger.CoreLogManager.log(
-                    "Cloudflare WARP: цепочка через прокси «${underlyingProxy.name}» (${underlyingProxy.protocol})",
+                    "Cloudflare WARP: цепочка через прокси «${underlyingProxy.name}» (${underlyingProxy.protocol}) для надежного обхода ТСПУ",
                     tag = "WARP"
                 )
             } else {
                 if (underlyingFile.exists()) underlyingFile.delete()
                 if (isWarpServer) {
                     com.flowvpn.core.logger.CoreLogManager.log(
-                        "Cloudflare WARP: прямое подключение (отдельный сервер WireGuard)",
+                        "Cloudflare WARP: прямое подключение к ${server.address}:${server.port} (внимание: в РФ прямые подключения к WARP могут блокироваться ТСПУ)",
                         tag = "WARP"
                     )
                 }

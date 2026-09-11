@@ -58,7 +58,7 @@ class BoxServiceManager(
                             val name = file.name.lowercase()
                             if (name.endsWith(".lock") || name.endsWith("-wal") ||
                                 name.endsWith("-shm") || name.endsWith("-journal") ||
-                                name.contains("clash.db")) {
+                                name.contains("cache.db") || name.contains("clash.db")) {
                                 try {
                                     val deleted = file.delete()
                                     Timber.d("cleanupCorruptedCacheDatabases: deleted $deleted for ${file.absolutePath}")
