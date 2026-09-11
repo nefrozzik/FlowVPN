@@ -270,7 +270,6 @@ object SingBoxConfigBuilder {
         }
         parts += """
             "tls": {
-                "enabled": true,
                 "server_name": "consumer-masque.cloudflareclient.com",
                 "insecure": true,
                 "fragment": true,
@@ -532,7 +531,6 @@ object SingBoxConfigBuilder {
                 parts += """"profile": {${profileParts.joinToString(",")}}"""
                 parts += """
                     "tls": {
-                        "enabled": true,
                         "server_name": "consumer-masque.cloudflareclient.com",
                         "insecure": true,
                         "fragment": true,
