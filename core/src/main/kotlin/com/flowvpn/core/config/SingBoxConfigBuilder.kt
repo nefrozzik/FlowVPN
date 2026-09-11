@@ -459,19 +459,11 @@ object SingBoxConfigBuilder {
         val addrList = effectiveLocalAddrs.joinToString(",") { "\"$it\"" }
         val effectiveMtu = config.wireguardMtu ?: warpConfig?.mtu ?: 1280
 
-        val effectiveReserved = config.reserved?.takeIf { it.isNotEmpty() && it != listOf(0, 0, 0) }
-            ?: warpConfig?.reserved?.takeIf { it.isNotEmpty() && it != listOf(0, 0, 0) }
-            ?: config.reserved?.takeIf { it.isNotEmpty() }
-            ?: listOf(0, 0, 0)
-
         val peerParts = mutableListOf<String>()
         peerParts += """"address": "${config.address}""""
         peerParts += """"port": ${config.port}"""
         peerParts += """"public_key": "$peerPublicKey""""
         peerParts += """"allowed_ips": ["0.0.0.0/0", "::/0"]"""
-        if (effectiveReserved.isNotEmpty() && effectiveReserved != listOf(0, 0, 0)) {
-            peerParts += """"reserved": [${effectiveReserved.joinToString(",")}]"""
-        }
         peerParts += """"persistent_keepalive_interval": 15"""
         config.preSharedKey?.let { peerParts += """"pre_shared_key": "$it"""" }
 
