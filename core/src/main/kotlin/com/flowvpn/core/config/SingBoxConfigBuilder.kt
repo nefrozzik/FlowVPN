@@ -250,8 +250,6 @@ object SingBoxConfigBuilder {
         } else config.address
         val effectivePort = if (config.port > 0) config.port else 443
         if (effectiveAddress.isNotBlank() && effectiveAddress != "0.0.0.0") {
-            parts += """"server": "$effectiveAddress""""
-            parts += """"server_port": $effectivePort"""
             parts += """"address": "$effectiveAddress""""
             parts += """"port": $effectivePort"""
         }
@@ -517,8 +515,6 @@ object SingBoxConfigBuilder {
                 } else warp.endpointHost
                 val effectivePort = if (warp.endpointPort > 0) warp.endpointPort else 443
                 if (effectiveAddress.isNotBlank() && effectiveAddress != "0.0.0.0") {
-                    parts += """"server": "$effectiveAddress""""
-                    parts += """"server_port": $effectivePort"""
                     parts += """"address": "$effectiveAddress""""
                     parts += """"port": $effectivePort"""
                 }
